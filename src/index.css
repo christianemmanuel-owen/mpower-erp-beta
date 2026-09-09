@@ -1,0 +1,204 @@
+/* Three faces, one per size tier - see the redesign spec.
+   Tier 1  Archivo        28px hero figures
+   Tier 2  Public Sans    20px titles, 13px body and card titles
+   Tier 3  IBM Plex Sans  12px meta, 10px eyebrows
+   Two weights from each; 500 and 700 are deliberately not imported - so
+   `font-bold` and `font-medium` have no face to resolve to and the browser
+   synthesises one. Ninety-six call sites were doing exactly that, rendering a
+   smeared faux bold beside real 600. Use font-normal and font-semibold. */
+@import '@fontsource/archivo/400.css';
+@import '@fontsource/archivo/600.css';
+@import '@fontsource/public-sans/400.css';
+@import '@fontsource/public-sans/600.css';
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import 'tailwindcss';
+@import 'leaflet/dist/leaflet.css';
+
+@theme {
+  /* ---- type ---- */
+  --font-sans: 'Public Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-display: 'Archivo', system-ui, sans-serif;
+  --font-meta: 'IBM Plex Sans', system-ui, sans-serif;
+
+  /* ---- surfaces ----
+     Cool neutrals with a faint cyan bias so they sit with the teal
+     rather than fighting it. Replaces the warm paper palette. */
+  --color-paper: #fafbfb;
+  --color-hovrow: #f0f2f3;
+  --color-fill2: #f0f2f3;
+  --color-kanban: #f0f2f3;
+  --color-sidebar: #f5f6f7;
+
+  /* ---- lines ---- */
+  --color-line: #e5e8ea;
+  --color-linesoft: #eef0f2;
+  --color-inputline: #d3d8dc;
+
+  /* ---- ink ---- */
+  --color-ink: #14181b;
+  --color-inkcard: #1f242a;
+  --color-inkhov: #2c333a;
+  --color-lab: #3a424a;
+  --color-sec: #5f6971;
+  --color-mut: #78828b;
+  --color-faint: #a8b0b7;
+  --color-railidle: #78828b;
+
+  /* ---- accent: structural only (active nav, links, primary data) ---- */
+  --color-teal: #116a63;
+  --color-tealbright: #159187;
+  --color-tealsoft: #b9d6d2;
+  --color-tealtext: #0f625c;
+  --color-tealbadge: #e7f0ef;
+  --color-tealbadgehov: #d6e7e5;
+  --color-tealbtn: #0e5a54;
+
+  /* ---- state: amber means watch it, red means act now ---- */
+  --color-amber: #c99029;
+  --color-ambertext: #8a5b0c;
+  --color-amberbadge: #f9f0de;
+  --color-amberline: #e0b970;
+  --color-redf: #be4a44;
+  --color-redtext: #9c2c2c;
+  --color-redbadge: #f9eae9;
+  --color-redbright: #d8635c;
+
+  /* Green is retired from the dashboard - a finished thing needs nothing
+     from you. Kept only because other modules still reference it. */
+  --color-greentext: #1b6e45;
+  --color-greenbadge: #e4f1ea;
+
+  /* Avatar tints neutralised - the colour never encoded anything. */
+  --color-avamber: #edeff1;
+  --color-avambertext: #5f6971;
+  --color-avteal: #edeff1;
+  --color-avtealtext: #5f6971;
+}
+
+body {
+  margin: 0;
+  /* The page itself never scrolls sideways.
+     `clip` rather than `hidden` on purpose: `hidden` would make this a scroll
+     container, and the top bar sticks to the top of its scrollport - it would
+     stop sticking. `clip` refuses the scroll without creating one. This is a
+     backstop; anything genuinely wider than the column (a table, a board)
+     scrolls inside its own box. */
+  overflow-x: clip;
+  background: #fafbfb;
+  color: #14181b;
+  font-family: 'Public Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The only surviving entrance animation: gauge and progress fills, where the
+   motion reads as the bar being measured. Card-level `rise` is gone - a whole
+   screen fading up on every navigation is noise, not polish. */
+@keyframes growX {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+@keyframes popIn {
+  from { transform: scale(.98) translateY(4px); opacity: 0; }
+  to { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+.grow { transform-origin: left; animation: growX 0.6s cubic-bezier(.2,.7,.3,1) both; }
+
+/* Retained as a no-op so the ~40 `rise` call sites across modules keep
+   compiling; delete the class from those files in a later pass. */
+.rise { animation: none; }
+
+/* Toasts enter from the corner they live in. Short, and only on the way in -
+   a message that animates out is a message you cannot finish reading. */
+@keyframes toastIn {
+  from { transform: translateY(8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.toast-in { animation: toastIn .18s cubic-bezier(.2,.7,.3,1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .grow { animation: none; }
+  .toast-in { animation: none; }
+  [style*='dockIn'] { animation: none !important; }
+}
+
+/* Money and quantity fields carry no spinners.
+
+   Chrome reserves ~16px inside the box for the up/down arrows and paints them
+   on hover, so a column wide enough to read "475,110" at rest silently became
+   too narrow the moment the pointer was over it - which is exactly when
+   somebody is typing in it. Nobody nudges an invoice amount by one peso at a
+   time with an arrow either. */
+.nospin::-webkit-outer-spin-button,
+.nospin::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.nospin { -moz-appearance: textfield; appearance: textfield; }
+
+/* The dropdown chevron, drawn by us rather than by the browser.
+
+   A native <select> paints its arrow at a fixed inset from the right edge -
+   about 4px on Chrome - and padding cannot move it, because padding shifts the
+   text and leaves the arrow where the UA put it. It sat almost against the
+   border.
+
+   Scoped to `select` on purpose: the same class is on the search inputs that
+   sit beside these in a filter row, and an input has no arrow to replace. That
+   is what lets one class name serve both without a chevron appearing on a text
+   box.
+
+   The glyph is lucide's ChevronDown at 2px, in --color-mut, so a dropdown
+   matches every other chevron in the app rather than using whichever one the
+   platform ships. */
+select.ctl {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%2378828b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  /* Room, so a long option label cannot run under the chevron. */
+  padding-right: 32px;
+}
+
+/* Quiet basemap.
+
+   The OpenStreetMap raster style is designed to be read on its own: green
+   landcover, orange and red road classes, saturated blue sea. On the trips map
+   it outshouted the trucks, which are the only part anyone is looking at.
+
+   A purpose-built grey basemap would be cleaner, but every good one carries a
+   licence - CARTO's Positron wants an account, Stadia's keyless tier is
+   localhost only, Esri's free endpoints are unclear for commercial use. This
+   keeps the tiles and their existing attribution and takes the colour out here.
+
+   The filter is scoped to the tile pane, so markers, depot chips and plate
+   labels drawn in the overlay panes keep full colour and stay the brightest
+   things on the map.
+
+   Turned down, not off. The first pass was near-greyscale and lost something
+   worth keeping: around Manila Bay the coastline is most of what tells you
+   where anything is, and with the blue gone the sea and the land read as one
+   flat sheet. At this level water is faintly blue and parks faintly green -
+   enough to navigate by, not enough to compete with a red marker. Raise
+   `saturate` for more colour, lower it for less; that one number is the dial. */
+.map-quiet .leaflet-tile-pane {
+  filter: saturate(0.6) brightness(1.02) contrast(0.95);
+}
+
+/* The compose dock rising from the bottom edge. Short and without travel, so
+   it reads as something arriving rather than something animating. */
+@keyframes dockIn {
+  from { transform: translateY(12px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
