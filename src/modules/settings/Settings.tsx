@@ -1,3 +1,4 @@
+import { AXLE_CONFIGS, axleConfigLabel } from '../../lib/vehicleLimits'
 import { useState } from 'react'
 import { useTables } from '../../lib/data'
 import { repos, safeDeleteLookup } from '../../data/repo'
@@ -6,13 +7,13 @@ import { useNavigate } from 'react-router-dom'
 import { useAuth, canAccess } from '../../lib/auth'
 import { label } from '../../lib/format'
 import {
-  Avatar, Card, Field, GhostButton, Input, PageHeader, PanelNav, PrimaryButton, Select, Dialog,
+  Avatar, Card, Field, GhostButton, Input, FormSection, PageHeader, PanelNav, PrimaryButton, Select, Dialog, RowAction,
 } from '../../components/ui'
-import { Pencil, Trash2 } from 'lucide-react'
 import Seats from './Seats'
 import DashboardRoles from './DashboardRoles'
+import MapPicker from '../../components/MapPicker'
 
-type Kind = 'suppliers' | 'warehouses' | 'agents' | 'customers' | 'bankAccounts' | 'trucks'
+type Kind = 'suppliers' | 'haulers' | 'warehouses' | 'agents' | 'customers' | 'bankAccounts' | 'trucks'
 
 interface FieldDef {
   key: string
@@ -22,26 +23,57 @@ interface FieldDef {
   /** Value a brand-new record starts with, before the user types anything. */
   default?: string | number
   hint?: string
+  /** How many columns of the section's grid it takes - an address wants two. */
+  span?: number
 }
 
-const config: Record<Kind, { title: string; fields: FieldDef[]; name: (r: Record<string, unknown>) => string; meta: (r: Record<string, unknown>) => string }> = {
+/** One block of the dialog: a small heading and a row or two of fields laid
+ * across `cols` columns. Wide and short on purpose - these are reference
+ * records with a handful of fields each, and a tall single column made a
+ * supplier look like a questionnaire. */
+interface SectionDef { title: string; keys: string[]; cols: number }
+
+const config: Record<Kind, { title: string; blurb: string; fields: FieldDef[]; sections: SectionDef[]; name: (r: Record<string, unknown>) => string; meta: (r: Record<string, unknown>) => string }> = {
   suppliers: {
     title: 'Suppliers',
+    blurb: 'Where the fuel comes from. Picked on every purchase; paid from Treasury → Payables.',
+    sections: [{ title: 'Supplier', keys: ['name', 'address'], cols: 3 }, { title: 'Contacts', keys: ['contactPerson', 'contactNumber', 'agentName', 'agentContact'], cols: 4 }, { title: 'Loading and terms', keys: ['depotName', 'depotAddress', 'paymentTermDays'], cols: 4 }],
     fields: [
       { key: 'name', label: 'Name' },
       { key: 'contactPerson', label: 'Contact person' },
       { key: 'contactNumber', label: 'Contact number' },
-      { key: 'address', label: 'Address' },
-      { key: 'paymentTermDays', label: 'Payment term (days)', type: 'number', default: 30, hint: 'A new purchase from this supplier auto-fills its due date this many days out (0 = pay on delivery).' },
+      { key: 'address', span: 2, label: 'Address' },
+      { key: 'agentName', label: 'Sales agent', hint: 'Their rep for our account.' },
+      { key: 'agentContact', label: 'Agent contact' },
+      { key: 'depotName', label: 'Loading depot', hint: 'If not the office address.' },
+      { key: 'depotAddress', span: 2, label: 'Depot address' },
+      { key: 'paymentTermDays', label: 'Payment term (days)', type: 'number', default: 30, hint: 'Due date on new purchases. 0 = on delivery.' },
     ],
     name: (r) => String(r.name),
-    meta: (r) => `${r.contactPerson} · ${r.contactNumber} · Net ${r.paymentTermDays ?? 30}`,
+    meta: (r) => `${r.agentName || r.contactPerson} · ${r.agentContact || r.contactNumber} · Net ${r.paymentTermDays ?? 30}`,
+  },
+  haulers: {
+    title: 'Haulers',
+    blurb: 'Third-party trucking for loads our own fleet does not carry.',
+    sections: [{ title: 'Hauler', keys: ['name', 'address'], cols: 3 }, { title: 'Contact and fees', keys: ['contactPerson', 'contactNumber', 'defaultFee', 'paymentMode'], cols: 4 }],
+    fields: [
+      { key: 'name', label: 'Name' },
+      { key: 'contactPerson', label: 'Contact person' },
+      { key: 'contactNumber', label: 'Contact number' },
+      { key: 'address', span: 2, label: 'Address' },
+      { key: 'defaultFee', label: 'Usual fee (₱)', type: 'number', hint: 'Per run; editable per load.' },
+      { key: 'paymentMode', label: 'Usually paid by', type: 'select', options: ['bank_transfer', 'cash', 'check'], default: 'bank_transfer' },
+    ],
+    name: (r) => String(r.name),
+    meta: (r) => [r.contactPerson || r.contactNumber, r.defaultFee ? `₱${Number(r.defaultFee).toLocaleString()} per run` : 'no usual fee'].filter(Boolean).join(' · '),
   },
   warehouses: {
     title: 'Depots',
+    blurb: 'Where trucks load. Stock levels and drive-time estimates start here.',
+    sections: [{ title: 'Depot', keys: ['name', 'capacityLiters', 'address', 'lat', 'lng'], cols: 2 }],
     fields: [
       { key: 'name', label: 'Name' },
-      { key: 'address', label: 'Address' },
+      { key: 'address', span: 2, label: 'Address' },
       { key: 'capacityLiters', label: 'Capacity (liters)', type: 'number' },
       { key: 'lat', label: 'Latitude', type: 'number' },
       { key: 'lng', label: 'Longitude', type: 'number' },
@@ -51,6 +83,8 @@ const config: Record<Kind, { title: string; fields: FieldDef[]; name: (r: Record
   },
   agents: {
     title: 'Agents',
+    blurb: 'Sales agents. Quota and commission are measured against these.',
+    sections: [{ title: 'Agent', keys: ['name', 'contactNumber', 'monthlyQuotaLiters'], cols: 3 }],
     fields: [
       { key: 'name', label: 'Name' },
       { key: 'contactNumber', label: 'Contact number' },
@@ -61,20 +95,24 @@ const config: Record<Kind, { title: string; fields: FieldDef[]; name: (r: Record
   },
   customers: {
     title: 'Customers',
+    blurb: 'Who buys. Every sale, delivery and collection points at one of these.',
+    sections: [{ title: 'Customer', keys: ['company', 'brand', 'address', 'collectionAddress'], cols: 4 }, { title: 'Contact and terms', keys: ['contactPerson', 'contactNumber', 'paymentTermDays'], cols: 3 }],
     fields: [
       { key: 'company', label: 'Company' },
       { key: 'brand', label: 'Brand' },
-      { key: 'address', label: 'Address' },
-      { key: 'collectionAddress', label: 'Collection address', hint: 'Where payment is collected, if different - Collection screens fall back to the address above when blank.' },
+      { key: 'address', span: 2, label: 'Address' },
+      { key: 'collectionAddress', span: 2, label: 'Collection address', hint: 'If different from the address.' },
       { key: 'contactPerson', label: 'Contact person' },
       { key: 'contactNumber', label: 'Contact number' },
-      { key: 'paymentTermDays', label: 'Payment term (days)', type: 'number', default: 30, hint: 'A new sale to this customer auto-fills its due date this many days out (0 = due on the spot).' },
+      { key: 'paymentTermDays', label: 'Payment term (days)', type: 'number', default: 30, hint: 'Due date on new sales. 0 = on the spot.' },
     ],
     name: (r) => String(r.company),
     meta: (r) => `${r.brand} · ${r.address} · Net ${r.paymentTermDays ?? 30}`,
   },
   bankAccounts: {
     title: 'Bank accounts',
+    blurb: 'The company’s accounts. Payments land in and go out of these.',
+    sections: [{ title: 'Account', keys: ['bankName', 'accountName', 'accountNumberMasked'], cols: 3 }],
     fields: [
       { key: 'bankName', label: 'Bank' },
       { key: 'accountName', label: 'Account name' },
@@ -85,12 +123,27 @@ const config: Record<Kind, { title: string; fields: FieldDef[]; name: (r: Record
   },
   trucks: {
     title: 'Trucks',
+    blurb: 'The fleet. Weights and axles drive the truck-ban and overloading checks.',
+    sections: [{ title: 'Truck', keys: ['plateNumber', 'capacityLiters', 'gvwKg', 'tareKg'], cols: 4 }, { title: 'Road rules', keys: ['axleConfig', 'tollClass'], cols: 4 }],
     fields: [
       { key: 'plateNumber', label: 'Plate number' },
       { key: 'capacityLiters', label: 'Capacity (liters)', type: 'number' },
+      // The truck ban applies above 4,500 kg. Blank counts as heavy - see
+      // Truck.gvwKg - so a tanker nobody weighed still gets the warning.
+      { key: 'gvwKg', label: 'Gross vehicle weight (kg)', type: 'number' },
+      // For the overloading check: what it weighs empty, and which axle
+      // code sets its legal gross weight. See lib/vehicleLimits.ts.
+      { key: 'tareKg', label: 'Empty weight (kg)', type: 'number' },
+      { key: 'axleConfig', label: 'Axles', type: 'select', options: AXLE_CONFIGS.map((a) => a.key), default: 'rigid2' },
+      { key: 'tollClass', label: 'Tollway class', type: 'select', options: ['3', '2', '1'], default: '3' },
     ],
     name: (r) => String(r.plateNumber),
-    meta: (r) => `${Number(r.capacityLiters).toLocaleString()} L`,
+    meta: (r) => [
+      `${Number(r.capacityLiters).toLocaleString()} L`,
+      r.gvwKg ? `${Number(r.gvwKg).toLocaleString()} kg GVW` : 'GVW not set',
+      r.tareKg ? `${Number(r.tareKg).toLocaleString()} kg empty` : 'empty weight not set',
+      r.axleConfig ? axleConfigLabel(String(r.axleConfig)) : null,
+    ].filter(Boolean).join(' · '),
   },
 }
 
@@ -136,6 +189,8 @@ export default function Settings() {
     delete data.updatedAt
     for (const f of cfg.fields) {
       if (f.type === 'number') data[f.key] = Number(data[f.key] ?? f.default ?? 0)
+      // Tollway class is a number on the record; the picker gives a string.
+      if (f.key === 'tollClass' && data[f.key] !== undefined && data[f.key] !== '') data[f.key] = Number(data[f.key])
       if (data[f.key] === undefined) data[f.key] = f.type === 'number' ? (f.default ?? 0) : f.type === 'select' ? f.options?.[0] ?? '' : ''
     }
     if (editId) await repos[kind].update(editId, data as never)
@@ -166,7 +221,7 @@ export default function Settings() {
           did nothing at all while the Seats tab was open. */}
       <PageHeader title="Admin" />
 
-      <div className="grid grid-cols-[220px_1fr] items-start gap-[18px]">
+      <div className="grid grid-cols-[220px_minmax(0,1fr)] items-start gap-[18px]">
         {/* One nav shape for both settings pages - see PanelNav. This was a
             hand-rolled list with 14px radii and an active state filled solid
             ink, which appears nowhere else in the app. */}
@@ -215,22 +270,8 @@ export default function Settings() {
                   {/* Two uppercase text links, one teal and one red, sat where
                       every other list in the app puts icon buttons - and the
                       red one deleted a record on a single click. */}
-                  <button
-                    type="button"
-                    onClick={() => openEdit(r)}
-                    aria-label={`Edit ${cfg.name(r)}`}
-                    className="inline-flex h-[26px] w-[26px] cursor-pointer items-center justify-center rounded-[6px] border-0 bg-transparent text-mut transition-colors hover:bg-fill2 hover:text-ink"
-                  >
-                    <Pencil size={14} strokeWidth={1.8} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDeleting({ id: String(r.id), name: cfg.name(r) })}
-                    aria-label={`Delete ${cfg.name(r)}`}
-                    className="inline-flex h-[26px] w-[26px] cursor-pointer items-center justify-center rounded-[6px] border-0 bg-transparent text-mut transition-colors hover:bg-fill2 hover:text-redtext"
-                  >
-                    <Trash2 size={14} strokeWidth={1.8} />
-                  </button>
+                  <RowAction verb="edit" label={`Edit ${cfg.name(r)}`} onClick={() => openEdit(r)} />
+                  <RowAction verb="delete" label={`Delete ${cfg.name(r)}`} onClick={() => setDeleting({ id: String(r.id), name: cfg.name(r) })} />
                 </div>
               ))}
               {(rows ?? []).length === 0 && (
@@ -276,12 +317,12 @@ export default function Settings() {
       {cfg && (
       <Dialog
         open={formOpen}
-        // "Edit - Suppliers" named the list, not the record. The record's own
-        // name is what tells you which one you opened.
-        title={editId ? String(form.name ?? cfg.title) : `New ${SINGULAR[kind]}`}
-        subtitle={editId ? `${SINGULAR[kind]} details` : undefined}
+        // The record's own name, not the list it came from - "Seaoil
+        // Distribution", not "Suppliers". A new one is named by what it will be.
+        title={editId ? cfg.name(form) || cfg.title : `New ${SINGULAR[kind]}`}
+        subtitle={cfg.blurb}
         onClose={() => setFormOpen(false)}
-        width={560}
+        width={kind === 'warehouses' ? 880 : 760}
         footer={
           <>
             <GhostButton onClick={() => setFormOpen(false)}>Cancel</GhostButton>
@@ -289,22 +330,51 @@ export default function Settings() {
           </>
         }
       >
-        <div className="flex flex-col gap-[14px]">
-          {cfg.fields.map((f) => (
-            <Field key={f.key} label={f.label} hint={f.hint}>
-              {f.type === 'select' ? (
-                <Select value={String(form[f.key] ?? f.options?.[0] ?? '')} onChange={(e) => setForm((x) => ({ ...x, [f.key]: e.target.value }))}>
-                  {f.options?.map((o) => <option key={o} value={o}>{label(o)}</option>)}
-                </Select>
-              ) : (
-                <Input
-                  type={f.type ?? 'text'}
-                  value={String(form[f.key] ?? '')}
-                  onChange={(e) => setForm((x) => ({ ...x, [f.key]: e.target.value }))}
-                />
-              )}
-            </Field>
-          ))}
+        {/* A depot is placed on the map beside its fields, not above them:
+            click the gate, or find the address and nudge the pin. The
+            coordinates on the right fill themselves in and stay editable. */}
+        <div className={kind === 'warehouses' ? 'grid grid-cols-[1.15fr_1fr] gap-x-[20px]' : ''}>
+          {kind === 'warehouses' && (
+            <MapPicker
+              value={Number(form.lat) && Number(form.lng) ? { lat: Number(form.lat), lng: Number(form.lng) } : null}
+              // The pin is the truth: dropping it fills the address with
+              // what is at that spot, and the field stays editable after.
+              onChange={(p, lbl) => setForm((x) => ({ ...x, lat: p.lat, lng: p.lng, ...(lbl ? { address: lbl } : {}) }))}
+              height={300}
+              placeholder="Find the depot’s address…"
+              pinLabel="Depot"
+            />
+          )}
+          <div>
+            {cfg.sections.map((section, i) => (
+              <div key={section.title}>
+                <FormSection first={i === 0}>{section.title}</FormSection>
+                <div className="grid gap-x-4 gap-y-[12px]" style={{ gridTemplateColumns: `repeat(${section.cols}, minmax(0, 1fr))` }}>
+                  {section.keys.map((key) => {
+                    const f = cfg.fields.find((x) => x.key === key)
+                    if (!f) return null
+                    return (
+                      <div key={f.key} style={{ gridColumn: `span ${Math.min(f.span ?? 1, section.cols)}` }}>
+                        <Field label={f.label} hint={f.hint}>
+                          {f.type === 'select' ? (
+                            <Select value={String(form[f.key] ?? f.options?.[0] ?? '')} onChange={(e) => setForm((x) => ({ ...x, [f.key]: e.target.value }))}>
+                              {f.options?.map((o) => <option key={o} value={o}>{label(o)}</option>)}
+                            </Select>
+                          ) : (
+                            <Input
+                              type={f.type ?? 'text'}
+                              value={String(form[f.key] ?? '')}
+                              onChange={(e) => setForm((x) => ({ ...x, [f.key]: e.target.value }))}
+                            />
+                          )}
+                        </Field>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </Dialog>
       )}
@@ -312,38 +382,38 @@ export default function Settings() {
       <Dialog
         open={deleting !== null}
         title={`Delete ${deleting?.name ?? 'this record'}?`}
-        subtitle="This cannot be undone."
+        subtitle={`${cfg ? SINGULAR[kind].charAt(0).toUpperCase() + SINGULAR[kind].slice(1) : 'Record'} · cannot be undone`}
         onClose={() => setDeleting(null)}
         width={480}
         footer={
           <>
             <GhostButton onClick={() => setDeleting(null)}>Cancel</GhostButton>
-            <PrimaryButton onClick={remove}>Delete</PrimaryButton>
+            <PrimaryButton tone="danger" onClick={remove}>Delete {cfg ? SINGULAR[kind] : 'record'}</PrimaryButton>
           </>
         }
       >
-        <p className="m-0 text-[13px] text-lab">
-          Anything already pointing at this record keeps pointing at it, so the delete is refused if it
-          is in use - you will be told which records are holding it.
+        <p className="m-0 text-[13px] leading-[1.5] text-lab">
+          If anything already points at this record - a purchase, a sale, a trip - the delete is
+          refused and you are told what is holding it. Nothing else changes.
         </p>
       </Dialog>
 
       <Dialog
         open={resetting}
-        title="Replace everything with the demo dataset?"
-        subtitle="Every record in this system"
+        title="Replace everything with the demo data?"
+        subtitle="Every record in the system · cannot be undone"
         onClose={() => setResetting(false)}
         width={480}
         footer={
           <>
             <GhostButton onClick={() => setResetting(false)}>Cancel</GhostButton>
-            <PrimaryButton onClick={() => { setResetting(false); resetDemoData() }}>Reset demo data</PrimaryButton>
+            <PrimaryButton tone="danger" onClick={() => { setResetting(false); resetDemoData() }}>Replace with demo data</PrimaryButton>
           </>
         }
       >
-        <p className="m-0 text-[13px] text-lab">
+        <p className="m-0 text-[13px] leading-[1.5] text-lab">
           Sales, purchases, trips, attendance, payroll runs and every reference record are deleted and
-          replaced with the sample data. There is no undo.
+          replaced with the sample set. Seats are kept.
         </p>
       </Dialog>
     </div>
@@ -354,6 +424,7 @@ export default function Settings() {
  *  rather than the list it came from. */
 const SINGULAR: Record<Kind | 'seats', string> = {
   suppliers: 'supplier',
+  haulers: 'hauler',
   warehouses: 'depot',
   agents: 'agent',
   customers: 'customer',

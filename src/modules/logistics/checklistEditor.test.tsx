@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import ChecklistEditor from './ChecklistEditor'
 import { CHECKLIST_ITEMS } from '../../lib/logistics'
 import type { Delivery, PreDispatchChecklist } from '../../data/types'
+
+vi.mock('../../lib/auth', () => ({ useAuth: () => ({ seat: { id: 'seat1', name: 'Grace Villanueva' } }) }))
 
 afterEach(cleanup)
 
@@ -65,11 +67,21 @@ describe('ChecklistEditor', () => {
     expect(notes.tagName).toBe('TEXTAREA')
   })
 
-  it('ticks every item at once', () => {
-    const onChange = view()
-    fireEvent.click(screen.getByRole('button', { name: 'Tick all' }))
-    expect(onChange).toHaveBeenCalledTimes(1)
-    const next = onChange.mock.calls[0][0] as PreDispatchChecklist
-    expect(CHECKLIST_ITEMS.every((i) => next[i.key] === true)).toBe(true)
+  /** The client's rule: no shortcut. Every box starts empty and is ticked by
+   *  the person who looked. */
+  it('offers no way to tick everything at once', () => {
+    view()
+    expect(screen.queryByRole('button', { name: /tick all/i })).toBeNull()
+    expect(CHECKLIST_ITEMS.some((i) => i.label === 'Brakes')).toBe(true)
+    expect(screen.getByRole('checkbox', { name: 'Brakes' })).toBeTruthy()
+    expect(screen.getAllByRole('checkbox').every((c) => !(c as HTMLInputElement).checked)).toBe(true)
+  })
+
+  it('asks the driver, pahinante and dispatch personnel to sign on screen', () => {
+    view()
+    expect(screen.getByRole('img', { name: 'Driver signature pad' })).toBeTruthy()
+    expect(screen.getByRole('img', { name: 'Pahinante signature pad' })).toBeTruthy()
+    expect(screen.getByRole('img', { name: 'Dispatch personnel signature pad' })).toBeTruthy()
+    expect(screen.getByText(/still to sign/)).toBeTruthy()
   })
 })

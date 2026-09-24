@@ -30,9 +30,19 @@ export const movementType = (d: Delivery): MovementType => d.movementType ?? DEF
 export const MOVEMENT_LABELS: Record<MovementType, string> = {
   delivery_to_client: 'Delivery to client',
   pickup_from_client: 'Pickup from client',
-  pickup_from_depot: 'Pickup from depot',
-  delivery_from_depot: 'Delivery from depot',
+  pickup_from_depot: 'Pickup from supplier depot',
+  delivery_from_depot: 'Delivery from supplier depot',
 }
+
+/**
+ * The movements a company truck makes - the ones a trip can be booked as.
+ *
+ * A delivery from the supplier's depot is the supplier's truck or a hauler,
+ * and is recorded on the purchase (its fulfillment), not as a trip. The type
+ * stays in MOVEMENT_LABELS so records made before that distinction still
+ * open and read correctly.
+ */
+export const TRIP_MOVEMENTS: readonly MovementType[] = ['delivery_to_client', 'pickup_from_depot', 'pickup_from_client']
 
 /** Terminal states - a movement here will not change again on its own. */
 export const isConcluded = (s: DeliveryStatus) => s === 'delivered' || s === 'failed'
@@ -49,18 +59,50 @@ export const documentsFor = (d: Delivery): readonly string[] => MOVEMENT_DOCUMEN
  * they are not device reads, and must not quietly become device reads when 2.8
  * and 2.9 land. A live feed would go in a separate field beside these.
  */
-export const CHECKLIST_ITEMS: ReadonlyArray<{ key: keyof PreDispatchChecklist; label: string }> = [
-  { key: 'identificationVerified', label: 'Identification verified' },
-  { key: 'loadConfirmed', label: 'Load confirmed' },
-  { key: 'gpsPresent', label: 'GPS present and functioning' },
-  { key: 'fuelSensorPresent', label: 'Fuel sensor present and functioning' },
-  { key: 'smartLockPresent', label: 'Smart lock present and functioning' },
-  { key: 'fullTankConfirmed', label: 'Full tank confirmed' },
-  { key: 'engineInspected', label: 'Engine inspected' },
-  { key: 'partsInspected', label: 'Parts inspected' },
-  { key: 'tiresInspected', label: 'Tires inspected' },
-  { key: 'bodyCamPresent', label: 'Body cam present' },
+/**
+ * The pre-dispatch checklist, in the order a crew walks it.
+ *
+ * The vehicle block is BLOWBAGETS - Battery, Lights, Oil, Water, Brakes, Air,
+ * Gas, Engine, Tires, Self - the LTO's own pre-trip mnemonic, which the
+ * client asked for by name. Then the devices the company fits, the papers and
+ * cash the crew carry, and the load. Every box starts empty: a slip that
+ * arrives pre-ticked is a slip nobody checked.
+ */
+export interface ChecklistItem { key: keyof PreDispatchChecklist; label: string; group: ChecklistGroup }
+export type ChecklistGroup = 'Vehicle (BLOWBAGETS)' | 'Devices' | 'Documents & cash' | 'Load'
+
+export const CHECKLIST_ITEMS: ReadonlyArray<ChecklistItem> = [
+  { key: 'batteryChecked', label: 'Battery', group: 'Vehicle (BLOWBAGETS)' },
+  { key: 'lightsChecked', label: 'Lights', group: 'Vehicle (BLOWBAGETS)' },
+  { key: 'oilChecked', label: 'Oil', group: 'Vehicle (BLOWBAGETS)' },
+  { key: 'waterChecked', label: 'Water', group: 'Vehicle (BLOWBAGETS)' },
+  { key: 'brakesChecked', label: 'Brakes', group: 'Vehicle (BLOWBAGETS)' },
+  { key: 'airChecked', label: 'Air (tire pressure)', group: 'Vehicle (BLOWBAGETS)' },
+  { key: 'fullTankConfirmed', label: 'Gas - truck fuelled', group: 'Vehicle (BLOWBAGETS)' },
+  { key: 'engineInspected', label: 'Engine', group: 'Vehicle (BLOWBAGETS)' },
+  { key: 'tiresInspected', label: 'Tires', group: 'Vehicle (BLOWBAGETS)' },
+  { key: 'driverFit', label: 'Self - driver fit to drive', group: 'Vehicle (BLOWBAGETS)' },
+  { key: 'partsInspected', label: 'Parts and body', group: 'Vehicle (BLOWBAGETS)' },
+  { key: 'gpsPresent', label: 'GPS present and working', group: 'Devices' },
+  { key: 'fuelSensorPresent', label: 'Fuel sensor present and working', group: 'Devices' },
+  { key: 'smartLockPresent', label: 'Smart lock present and working', group: 'Devices' },
+  { key: 'bodyCamPresent', label: 'Body cam present', group: 'Devices' },
+  { key: 'identificationVerified', label: 'Crew identification verified', group: 'Documents & cash' },
+  { key: 'driverLicenseChecked', label: 'Driver’s license valid and on board', group: 'Documents & cash' },
+  { key: 'receiptOnBoard', label: 'Delivery receipt and/or invoice on board', group: 'Documents & cash' },
+  { key: 'tollCardsOnBoard', label: 'Toll cards / RFID loaded', group: 'Documents & cash' },
+  { key: 'allowanceHanded', label: 'Allowance handed to crew', group: 'Documents & cash' },
+  { key: 'loadConfirmed', label: 'Fuel load matches the orders', group: 'Load' },
 ]
+
+export const CHECKLIST_GROUPS: readonly ChecklistGroup[] = ['Vehicle (BLOWBAGETS)', 'Devices', 'Documents & cash', 'Load']
+
+/** Who signs the slip on screen. */
+export const CHECKLIST_SIGNATORIES = [
+  { role: 'driver', label: 'Driver' },
+  { role: 'pahinante', label: 'Pahinante' },
+  { role: 'dispatcher', label: 'Dispatch personnel' },
+] as const
 
 export const emptyChecklist = (): PreDispatchChecklist => ({
   identificationVerified: false,
@@ -75,24 +117,26 @@ export const emptyChecklist = (): PreDispatchChecklist => ({
   bodyCamPresent: false,
 })
 
-/** A pickup from a client is the one movement MPower does not dispatch a loaded
- * vehicle for, so it carries no pre-dispatch checklist (Exhibit A 1.5). */
+/** Every movement carries a checklist except a pickup from a client, where
+ * MPower is not sending out a loaded vehicle. */
 export const needsChecklist = (d: Delivery) => documentsFor(d).includes('preDispatchChecklist')
 
 export interface ChecklistProgress {
   answered: number
   total: number
   complete: boolean
-  /** Items still unticked, so the dispatcher is told what is outstanding rather
-   * than just that something is. */
   outstanding: string[]
+  /** All three signatures drawn. */
+  signed: boolean
+  missingSignatures: string[]
 }
 
 export function checklistProgress(c: PreDispatchChecklist | undefined): ChecklistProgress {
   const total = CHECKLIST_ITEMS.length
-  if (!c) return { answered: 0, total, complete: false, outstanding: CHECKLIST_ITEMS.map((i) => i.label) }
+  const missingSignatures = CHECKLIST_SIGNATORIES.filter((s) => !c?.signatures?.[s.role]?.image).map((s) => s.label)
+  if (!c) return { answered: 0, total, complete: false, outstanding: CHECKLIST_ITEMS.map((i) => i.label), signed: false, missingSignatures }
   const outstanding = CHECKLIST_ITEMS.filter((i) => !c[i.key]).map((i) => i.label)
-  return { answered: total - outstanding.length, total, complete: outstanding.length === 0, outstanding }
+  return { answered: total - outstanding.length, total, complete: outstanding.length === 0, outstanding, signed: missingSignatures.length === 0, missingSignatures }
 }
 
 const DAY = 86_400_000
@@ -214,6 +258,79 @@ export function availableOn<T extends { id: string }>(
   return { free, busy }
 }
 
+/**
+ * When in the day a trip starts, as hours (8.5 = 08:30). The typed time wins;
+ * a record with only a date carries whatever hour its timestamp happens to
+ * hold, which for a form-entered date is midnight.
+ */
+/**
+ * When the truck actually leaves, as one instant: the schedule day plus the
+ * departure time when one is set. The ban checks compare a clock time to a
+ * rule's window, and the day's date field alone carries whatever time it was
+ * saved with - so a trip moved to 10:00 on the day strip was still checked
+ * against the 07:00 the date input left behind.
+ */
+export function tripDeparture(d: Pick<Delivery, 'scheduleDate' | 'scheduleTime'>): Date {
+  const at = new Date(d.scheduleDate)
+  if (d.scheduleTime && /^\d{2}:\d{2}/.test(d.scheduleTime)) {
+    const [h, m] = d.scheduleTime.split(':').map(Number)
+    at.setHours(h, m, 0, 0)
+  }
+  return at
+}
+
+export function tripStartHour(d: Pick<Delivery, 'scheduleDate' | 'scheduleTime'>): number {
+  if (d.scheduleTime && /^\d{2}:\d{2}/.test(d.scheduleTime)) {
+    const [h, m] = d.scheduleTime.split(':').map(Number)
+    return h + m / 60
+  }
+  const t = new Date(d.scheduleDate)
+  return t.getHours() + t.getMinutes() / 60
+}
+
+/** How long a truck is taken up by one trip when nobody has said otherwise:
+ *  a loading-to-return cycle of about two hours. A trip can carry its own
+ *  `durationHours`, set by hand or from a drive-time estimate. */
+export const TRIP_BLOCK_HOURS = 2
+
+export const tripHours = (d: Pick<Delivery, 'durationHours'>) =>
+  d.durationHours && d.durationHours > 0 ? d.durationHours : TRIP_BLOCK_HOURS
+
+/**
+ * Hours a truck needs for a delivery, from a one-way drive time: there,
+ * unload, back, plus slack for loading and traffic. Rounded up to the half
+ * hour so the board's blocks land on its grid.
+ */
+export function suggestedHours(minutesOneWay: number, unloadMinutes = 30): number {
+  const total = minutesOneWay * 2 + unloadMinutes + 15
+  return Math.max(1, Math.ceil((total / 60) * 2) / 2)
+}
+
+export const fmtHours = (h: number) => {
+  const hh = Math.floor(h)
+  const mm = Math.round((h - hh) * 60)
+  return hh === 0 ? `${mm}m` : mm === 0 ? `${hh}h` : `${hh}h ${mm}m`
+}
+
+export const fmtHour = (h: number) => {
+  const hh = Math.floor(h)
+  const mm = Math.round((h - hh) * 60)
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+}
+
+/** The other open trips on this truck that day, earliest first - what
+ *  "booked that day" actually means, so a dispatcher can pick a gap. */
+export function truckBookings(deliveries: Delivery[], truckId: string, dayISO: string, excludeId?: string) {
+  return deliveries
+    .filter((d) => d.id !== excludeId && d.truckId === truckId && occupiesOn(d, dayISO))
+    .map((d) => ({ delivery: d, start: tripStartHour(d), end: tripStartHour(d) + tripHours(d) }))
+    .sort((a, b) => a.start - b.start)
+}
+
+/** Does a trip starting at `start` and lasting `hours` overlap any of these bookings? */
+export const clashesWith = (start: number, bookings: { start: number; end: number }[], hours = TRIP_BLOCK_HOURS) =>
+  bookings.filter((b) => start < b.end && start + hours > b.start)
+
 export const availableTrucks = (trucks: Truck[], deliveries: Delivery[], dayISO: string) =>
   availableOn(trucks, deliveries, dayISO, (d) => [d.truckId])
 
@@ -285,10 +402,42 @@ export function daysUntil(dateISO: string, todayISO: string): number {
 export function banApplies(
   rule: TruckBanRule,
   plateNumber: string,
-  when: { weekday: number; time: string },
+  /**
+   * When the truck is out. `time` is when it leaves; `hours` is how long it
+   * is on the road after that. Without `hours` only the departure instant is
+   * checked - which is the old behaviour, and is wrong for a real trip: a
+   * truck leaving at 05:30 on an eight-hour run is on EDSA at 07:00, and
+   * the ban catches it there.
+   */
+  when: { weekday: number; time: string; holiday?: boolean; hours?: number },
+  truck?: { heavy?: boolean },
+  /** Where the trip's planned route goes; undefined when no route is planned. */
+  zones?: readonly string[],
 ): boolean {
   if (rule.active === false) return false
-  if (!rule.weekdays.includes(when.weekday)) return false
+  // A city's ban only reaches a trip that enters the city. With no route
+  // planned there is nothing to check it against, so it stays quiet - the
+  // drawer says to plan the route instead.
+  if (rule.zone && !(zones ?? []).includes(rule.zone)) return false
+  // The trip's span, in minutes from midnight of the day it leaves. A run
+  // that ends after midnight also has a slice on the next day, which only
+  // counts when the rule is in force on that weekday too.
+  const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m }
+  const s = toMin(when.time)
+  const e = Math.max(s + 1, s + Math.round((when.hours ?? 0) * 60))
+  const spans: [number, number][] = []
+  if (rule.weekdays.includes(when.weekday)) spans.push([s, Math.min(e, 1440)])
+  if (e > 1440 && rule.weekdays.includes((when.weekday + 1) % 7)) spans.push([0, e - 1440])
+  if (spans.length === 0) return false
+  // Number coding is lifted on holidays; a truck ban is not - the rule says
+  // which it is, so a holiday only clears the rules that the law clears.
+  if (rule.suspendedOnHolidays && when.holiday) return false
+  // A weight-based ban does not catch a light truck. Unknown weight is heavy
+  // (see Truck.gvwKg), which is why the caller passes a boolean, not a number.
+  if (rule.appliesTo === 'heavy' && truck?.heavy === false) return false
+  // The light-truck ban is the mirror image: an unweighed truck is heavy, so
+  // it is not caught by a rule for light ones.
+  if (rule.appliesTo === 'light' && truck?.heavy !== false) return false
 
   const digits = plateNumber.replace(/[^0-9]/g, '')
   const last = digits.slice(-1)
@@ -296,9 +445,13 @@ export function banApplies(
 
   const { startTime: from, endTime: to } = rule
   if (!from || !to) return true
-  return from <= to
-    ? when.time >= from && when.time <= to
-    : when.time >= from || when.time <= to
+  // The window lifts at its end: a 06:00–10:00 ban is over at 10:00, so a
+  // truck back by then is clear - which is what "leave at … instead" in the
+  // trip drawer promises. An overnight window is two pieces of the day.
+  const f = toMin(from)
+  const t = toMin(to)
+  const windows: [number, number][] = f <= t ? [[f, t]] : [[f, 1440], [0, t]]
+  return spans.some(([a, b]) => windows.some(([wf, wt]) => a < wt && b > wf))
 }
 
 /** Every active rule catching a truck at a moment, so a dispatcher can be shown
@@ -307,9 +460,65 @@ export function bansFor(
   rules: TruckBanRule[],
   plateNumber: string,
   scheduleISO: string,
+  ctx: {
+    /** Whether the truck is over the truck-ban weight. Omitted means heavy. */
+    heavy?: boolean
+    /** Holiday dates as "yyyy-MM-dd", so coding rules can stand down on them. */
+    holidays?: readonly string[]
+    /** The planned route's zones (TravelEstimate.zones), for city rules. */
+    zones?: readonly string[]
+    /** How long the truck is out from that moment; omitted checks the moment alone. */
+    hours?: number
+  } = {},
 ): TruckBanRule[] {
   const at = new Date(scheduleISO)
   if (Number.isNaN(at.getTime())) return []
-  const time = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
-  return rules.filter((r) => banApplies(r, plateNumber, { weekday: at.getDay(), time }))
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const time = `${p2(at.getHours())}:${p2(at.getMinutes())}`
+  const day = `${at.getFullYear()}-${p2(at.getMonth() + 1)}-${p2(at.getDate())}`
+  const holiday = ctx.holidays?.includes(day) ?? false
+  return rules.filter((r) => banApplies(r, plateNumber, { weekday: at.getDay(), time, holiday, hours: ctx.hours }, { heavy: ctx.heavy ?? true }, ctx.zones))
+}
+
+/**
+ * The rules that catch this truck at any point of that day, with their
+ * windows - what the day strip shades red so the dispatcher sees the gap
+ * rather than hunting for it. Ordered by start.
+ */
+export function dayBans(
+  rules: TruckBanRule[],
+  plateNumber: string,
+  scheduleISO: string,
+  ctx: Parameters<typeof bansFor>[3] = {},
+): TruckBanRule[] {
+  const at = new Date(scheduleISO)
+  if (Number.isNaN(at.getTime())) return []
+  at.setHours(0, 0, 0, 0)
+  return bansFor(rules, plateNumber, at.toISOString(), { ...ctx, hours: 24 })
+    .filter((r) => r.startTime && r.endTime)
+    .sort((a, b) => a.startTime.localeCompare(b.startTime))
+}
+
+/**
+ * The first departure, on the quarter hour after the current one, at which
+ * a run of `hours` is clear of every rule that day - or null when no time
+ * that day is. What "Leave at … instead" in the trip drawer offers.
+ */
+export function clearDeparture(
+  rules: TruckBanRule[],
+  plateNumber: string,
+  scheduleISO: string,
+  hours: number,
+  ctx: Parameters<typeof bansFor>[3] = {},
+): string | null {
+  const at = new Date(scheduleISO)
+  if (Number.isNaN(at.getTime())) return null
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const startMin = at.getHours() * 60 + at.getMinutes()
+  for (let m = Math.ceil((startMin + 1) / 15) * 15; m < 1440; m += 15) {
+    const t = new Date(at)
+    t.setHours(Math.floor(m / 60), m % 60, 0, 0)
+    if (bansFor(rules, plateNumber, t.toISOString(), { ...ctx, hours }).length === 0) return `${p2(Math.floor(m / 60))}:${p2(m % 60)}`
+  }
+  return null
 }

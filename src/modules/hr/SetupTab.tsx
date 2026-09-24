@@ -9,8 +9,8 @@ import {
 } from '../../data/statutory'
 import { label } from '../../lib/format'
 import {
-  Card, Chip, Dialog, Field, FormSection, GhostButton, Input, PanelNav, PrimaryButton, Select, Switch,
-  TabBar, filterCls,
+  Card, Chip, Dialog, Field, FormSection, GhostButton, Input, PanelNav, PrimaryButton, RowAction, Select, Switch,
+  TabBar, filterCls, PageSkeleton,
 } from '../../components/ui'
 import type {
   Holiday, HolidayKind, HrConfig, LeaveType, PaySchedule, PremiumRates, Shift,
@@ -30,10 +30,10 @@ const sections: { key: Section; title: string }[] = [
 export default function SetupTab() {
   const [section, setSection] = useState<Section>('shifts')
   const data = useTables(['shifts', 'holidays'] as const)
-  if (!data) return null
+  if (!data) return <PageSkeleton />
 
   return (
-    <div className="grid grid-cols-[220px_1fr] items-start gap-[18px]">
+    <div className="grid grid-cols-[220px_minmax(0,1fr)] items-start gap-[18px]">
       <PanelNav
         items={sections}
         active={section}
@@ -201,8 +201,8 @@ function ShiftsSection({ shifts }: { shifts: Shift[] }) {
               rest {s.restDays.length > 0 ? s.restDays.map((d) => WEEKDAYS[d]).join(', ') : 'none'}
             </p>
           </div>
-          <button onClick={() => openEdit(s)} className="cursor-pointer px-[6px] py-1 text-[11px] font-semibold uppercase text-tealtext hover:underline">Edit</button>
-          <button onClick={() => remove(s)} className="cursor-pointer px-[6px] py-1 text-[11px] font-semibold uppercase text-redtext hover:underline">Delete</button>
+          <RowAction verb="edit" label={`Edit ${s.name}`} onClick={() => openEdit(s)} />
+          <RowAction verb="delete" label={`Delete ${s.name}`} onClick={() => remove(s)} />
         </div>
       ))}
 
@@ -308,18 +308,8 @@ function HolidaysSection({ holidays }: { holidays: Holiday[] }) {
               <span className="w-[52px] font-semibold tabular-nums">{h.date.slice(5)}</span>
               <span className="flex-1">{h.name}</span>
               <Chip status={h.kind} text={label(h.kind)} />
-              <button
-                onClick={() => { setEditing(h); setForm({ date: h.date, name: h.name, kind: h.kind }); setFormOpen(true) }}
-                className="cursor-pointer px-[6px] py-1 text-[11px] font-semibold uppercase text-tealtext hover:underline"
-              >
-                Edit
-              </button>
-              <button
-                onClick={() => { if (confirm(`Remove ${h.name}?`)) repos.holidays.remove(h.id) }}
-                className="cursor-pointer px-[6px] py-1 text-[11px] font-semibold uppercase text-redtext hover:underline"
-              >
-                Delete
-              </button>
+              <RowAction verb="edit" label={`Edit ${h.name}`} onClick={() => { setEditing(h); setForm({ date: h.date, name: h.name, kind: h.kind }); setFormOpen(true) }} />
+              <RowAction verb="delete" label={`Delete ${h.name}`} onClick={() => { if (confirm(`Remove ${h.name}?`)) repos.holidays.remove(h.id) }} />
             </div>
           ))}
         </div>

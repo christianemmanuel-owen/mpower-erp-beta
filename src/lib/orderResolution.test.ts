@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { defaultTreatment, planResolution, planRevertResolution, treatmentsFor } from './orderResolution'
-import { restockedVolume, saleCounts } from './metrics'
+import { netSaleVolume, restockedVolume, saleCounts } from './metrics'
 import type { Sale, SaleInstallment } from '../data/types'
 
 const inst = (
@@ -31,19 +31,27 @@ const sale = (over: Partial<Sale> = {}): Sale => ({
 const RESOLVED_ON = '2026-08-21T00:00:00.000Z'
 
 describe('treatment options', () => {
-  it('offers restocking only for returns - a cancelled order never left the warehouse', () => {
-    expect(treatmentsFor('cancelled').map((t) => t.value)).not.toContain('restocked')
-    expect(treatmentsFor('returned').map((t) => t.value)).toContain('restocked')
+  it('asks only about the money - the fuel is a separate question', () => {
+    // "Restocked" and "written off" were fuel answers living in a money field.
+    // Neither is offered any more; the fuel is `backToStock`.
+    for (const kind of ['cancelled', 'returned'] as const) {
+      const values = treatmentsFor(kind).map((t) => t.value)
+      expect(values).not.toContain('restocked')
+      expect(values).not.toContain('written_off')
+      expect(values).toContain('no_action')
+      expect(values).toContain('refunded')
+      expect(values).toContain('credit_note')
+    }
   })
 
-  it('offers "no action" only for cancellations', () => {
-    expect(treatmentsFor('returned').map((t) => t.value)).not.toContain('no_action')
-    expect(treatmentsFor('cancelled').map((t) => t.value)).toContain('no_action')
+  it('offers a replacement only for a return', () => {
+    expect(treatmentsFor('cancelled').map((t) => t.value)).not.toContain('replaced')
+    expect(treatmentsFor('returned').map((t) => t.value)).toContain('replaced')
   })
 
-  it('defaults to the common case for each kind', () => {
+  it('defaults to nothing collected - the order reversed before money moved', () => {
     expect(defaultTreatment('cancelled')).toBe('no_action')
-    expect(defaultTreatment('returned')).toBe('restocked')
+    expect(defaultTreatment('returned')).toBe('no_action')
   })
 })
 
@@ -86,38 +94,43 @@ describe('planResolution', () => {
     expect(plan.cancelledInstallments).toBe(1)
   })
 
-  it('puts a restocked return back into stock', () => {
+  it('puts a return back into stock when the fuel came back, whatever the money', () => {
     const plan = planResolution(sale(), {
-      kind: 'returned', reason: 'Wrong depot', treatment: 'restocked', date: RESOLVED_ON,
+      kind: 'returned', reason: 'Wrong depot', treatment: 'refunded', backToStock: true, date: RESOLVED_ON,
     })
     expect(plan.restockedVolume).toBe(5_000)
+    expect(plan.returnedVolume).toBe(5_000)
     const after = { ...sale(), ...plan.patch } as Sale
     expect(restockedVolume(after)).toBe(5_000)
   })
 
   it('restocks only the returned portion of a partial return', () => {
     const plan = planResolution(sale(), {
-      kind: 'returned', reason: 'Short-filled', treatment: 'restocked', volumeReturned: 1_200, date: RESOLVED_ON,
+      kind: 'returned', reason: 'Short-filled', treatment: 'no_action', backToStock: true, volumeReturned: 1_200, date: RESOLVED_ON,
     })
     expect(plan.restockedVolume).toBe(1_200)
+    expect(plan.returnedVolume).toBe(1_200)
     const after = { ...sale(), ...plan.patch } as Sale
     expect(restockedVolume(after)).toBe(1_200)
   })
 
   it('never restocks more than was sold, however the form is filled in', () => {
     const plan = planResolution(sale(), {
-      kind: 'returned', reason: 'Typo', treatment: 'restocked', volumeReturned: 999_999, date: RESOLVED_ON,
+      kind: 'returned', reason: 'Typo', treatment: 'no_action', backToStock: true, volumeReturned: 999_999, date: RESOLVED_ON,
     })
     expect(plan.restockedVolume).toBe(5_000)
   })
 
-  it('returns nothing to stock when the fuel was written off', () => {
+  it('returns nothing to stock when the fuel did not come back - but the sale still comes off', () => {
     const plan = planResolution(sale(), {
-      kind: 'returned', reason: 'Contaminated', treatment: 'written_off', date: RESOLVED_ON,
+      kind: 'returned', reason: 'Contaminated', treatment: 'refunded', backToStock: false, date: RESOLVED_ON,
     })
     expect(plan.restockedVolume).toBe(0)
+    expect(plan.returnedVolume).toBe(5_000)
     const after = { ...sale(), ...plan.patch } as Sale
     expect(restockedVolume(after)).toBe(0)
+    expect(netSaleVolume(after)).toBe(0)
+    expect(after.resolution?.backToStock).toBe(false)
   })
 
   it('returns nothing to stock for a cancellation, even if volume is passed', () => {
@@ -131,7 +144,7 @@ describe('planResolution', () => {
 
   it('remembers where the order came from so it can be put back', () => {
     const plan = planResolution(sale({ status: 'fulfilled' }), {
-      kind: 'returned', reason: 'Rejected on arrival', treatment: 'restocked', date: RESOLVED_ON,
+      kind: 'returned', reason: 'Rejected on arrival', treatment: 'no_action', date: RESOLVED_ON,
     })
     expect(plan.patch.resolution?.previousStatus).toBe('fulfilled')
   })

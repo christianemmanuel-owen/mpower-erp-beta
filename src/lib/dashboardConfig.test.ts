@@ -82,7 +82,7 @@ describe('resolveWidgets', () => {
     // An administrator ticking "receivables" for a Logistics role must not leak
     // collection figures to a seat the access layer excluded.
     const dispatcher = seat({ role: 'Dispatcher', modules: ['logistics'] })
-    const configs = [config('Dispatcher', ['deliveryBoard', 'receivables', 'cashFlow'])]
+    const configs = [config('Dispatcher', ['deliveryBoard', 'receivables'])]
     expect(resolveWidgets(dispatcher, configs)).toEqual(['deliveryBoard'])
   })
 

@@ -5,6 +5,19 @@ export function fmtCurrency(v: number) {
   return peso.format(v)
 }
 
+/** "₱1.18M", "₱312k" - for a cell that must never wrap. Exact below ₱10,000. */
+export function fmtCurrencyShort(v: number) {
+  const abs = Math.abs(v)
+  if (abs >= 1_000_000) return `₱${(v / 1_000_000).toFixed(2).replace(/\.?0+$/, '')}M`
+  if (abs >= 10_000) return `₱${Math.round(v / 1000)}k`
+  return peso.format(v).replace('.00', '')
+}
+
+/** "9 Sep" - the short date a phone row can afford. */
+export function fmtDayMonth(iso: string) {
+  return new Date(iso).toLocaleDateString('en-PH', { month: 'short', day: 'numeric' })
+}
+
 export function fmtLiters(v: number) {
   return `${num.format(v)} L`
 }
@@ -54,6 +67,14 @@ export function todayISO(now = new Date()): string {
   return `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())}`
 }
 
+/** The calendar day an ISO timestamp falls on, in the viewer's own timezone,
+ * as plain "yyyy-MM-dd" - the same space as todayISO(). Slicing the ISO string
+ * instead reads the UTC day, which in Manila is yesterday until 08:00 and the
+ * comparison "due before today" is off by one for a third of every day. */
+export function dayISO(iso: string): string {
+  return todayISO(new Date(iso))
+}
+
 /** date + days, both in and out as plain "yyyy-MM-dd" - for auto-filling a due date from a
  * transaction date and an account's standing payment term. Does all arithmetic in UTC calendar
  * space (not the runtime's local timezone): parsing "yyyy-MM-ddT00:00:00" as local time and then
@@ -72,6 +93,15 @@ export function fmtTerm(days: number) {
 }
 
 export const labels: Record<string, string> = {
+  // Truck axle codes and tollway classes (lib/vehicleLimits.ts).
+  rigid2: '2-axle rigid (6 wheels)',
+  rigid3: '3-axle rigid (10 wheels)',
+  rigid4: '4-axle rigid (14 wheels)',
+  semi5: 'Tractor + semi-trailer, 5 axles (18 wheels)',
+  semi6: 'Tractor + semi-trailer, 6 axles (22 wheels)',
+  '1': 'Class 1 - cars, light vans',
+  '2': 'Class 2 - buses, closed trucks over 7 ft',
+  '3': 'Class 3 - heavy trucks',
   pickup: 'Pick up',
   delivered: 'Delivered',
   delivery: 'Delivery',
@@ -80,6 +110,10 @@ export const labels: Record<string, string> = {
   bank_transfer: 'Bank transfer',
   pending: 'Pending',
   collected: 'Collected',
+  // The custody chain past the collector. "Collected" stays the collector's
+  // word; these two are Treasury's.
+  deposited: 'In clearing',
+  cleared: 'Cleared',
   paid: 'Paid',
   cancelled: 'Cancelled',
   overdue: 'Overdue',

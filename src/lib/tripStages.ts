@@ -79,7 +79,10 @@ export function documentSlots(d: Delivery): { dispatch: string[]; delivery: stri
   const receipt = receiptSlot(d)
   const all = documentsFor(d).filter((s) => s !== 'preDispatchChecklist')
   return {
-    dispatch: all.filter((s) => s !== receipt),
+    // The delivery receipt is issued at dispatch and rides with the load; it
+    // returns signed. Both stages show its slot: dispatch for the number,
+    // delivery for the signed scan.
+    dispatch: all.filter((s) => s !== receipt || movementType(d) === 'delivery_to_client'),
     delivery: all.filter((s) => s === receipt),
   }
 }
@@ -100,19 +103,32 @@ export function stageGaps(d: Delivery, stage: TripStage, receiptOnFile: boolean)
     ].filter((x): x is string => x !== null)
   }
   if (stage === 'dispatch') {
-    if (!needsChecklist(d)) return []
-    const progress = checklistProgress(d.checklist)
-    return progress.complete
-      ? []
-      : [`${progress.outstanding.length} checklist item${progress.outstanding.length === 1 ? '' : 's'}`]
+    // The receipt goes out with the truck - its number is part of getting
+    // ready, not of coming back. Only the signing happens at the far end.
+    const out: string[] = []
+    if (movementType(d) === 'delivery_to_client' && !d.documents?.[receiptSlot(d)]?.referenceNo) out.push('a delivery receipt number')
+    if (needsChecklist(d)) {
+      const progress = checklistProgress(d.checklist)
+      if (!progress.complete) out.push(`${progress.outstanding.length} checklist item${progress.outstanding.length === 1 ? '' : 's'}`)
+      if (!progress.signed) out.push('the crew signatures')
+    }
+    return out
   }
   if (stage === 'delivery') {
     return [
-      !d.documents?.[receiptSlot(d)]?.referenceNo ? 'a receipt number' : null,
+      movementType(d) !== 'delivery_to_client' && !d.documents?.[receiptSlot(d)]?.referenceNo ? 'a receipt number' : null,
+      !d.receivedBy ? 'who signed' : null,
       !receiptOnFile ? 'the signed copy' : null,
     ].filter((x): x is string => x !== null)
   }
   return []
+}
+
+/** "Delivery receipt number", "17 checklist items" - each gap as a short
+ *  label for a chip, without the article the sentence form needs. */
+export function gapLabel(gap: string): string {
+  const bare = gap.replace(/^(a|an|the) /, '')
+  return bare.charAt(0).toUpperCase() + bare.slice(1)
 }
 
 /** "Needs a truck and a driver." - the gaps as one sentence. */

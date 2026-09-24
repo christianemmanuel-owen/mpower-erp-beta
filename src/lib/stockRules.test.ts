@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { netSaleVolume, receivedVolume, restockedVolume, stockFor } from './metrics'
+import { netSaleVolume, receivedVolume, restockedVolume, stockFor, stockSaleVolume } from './metrics'
 import type { Purchase, Sale } from '../data/types'
 
 /**
@@ -42,6 +42,46 @@ const SALE_CASES: { name: string; sale: Partial<Sale>; expected: number }[] = [
     sale: { status: 'returned', volumeLiters: 1000, resolution: { date: '2026-08-01', reason: 'typo', treatment: 'restocked', volumeReturned: 5000 } },
     expected: 0,
   },
+  {
+    name: 'refunded return whose fuel came back (new records) consumes nothing',
+    sale: { status: 'returned', volumeLiters: 1000, resolution: { date: '2026-08-01', reason: 'dispute', treatment: 'refunded', backToStock: true } },
+    expected: 0,
+  },
+  {
+    name: 'return whose fuel did not come back is still out of the tank',
+    sale: { status: 'returned', volumeLiters: 1000, resolution: { date: '2026-08-01', reason: 'dumped', treatment: 'credit_note', backToStock: false, volumeReturned: 400 } },
+    expected: 1000,
+  },
+]
+
+/**
+ * The SALES basis is a different table: a return comes off net sales whatever
+ * happened to the fuel or the money - net sales are sales less returns, the
+ * client's accounting. Inventory is not sales.
+ */
+const NET_SALES_CASES: { name: string; sale: Partial<Sale>; expected: number }[] = [
+  { name: 'confirmed counts in full - recognised on the client PO, not on dispatch', sale: { status: 'confirmed', volumeLiters: 1000 }, expected: 1000 },
+  { name: 'cancelled counts nothing', sale: { status: 'cancelled', volumeLiters: 1000 }, expected: 0 },
+  {
+    name: 'a full return comes off in full even when the fuel never came back',
+    sale: { status: 'returned', volumeLiters: 1000, resolution: { date: '2026-08-01', reason: 'dumped', treatment: 'refunded', backToStock: false } },
+    expected: 0,
+  },
+  {
+    name: 'a credit-note return comes off in full',
+    sale: { status: 'returned', volumeLiters: 1000, resolution: { date: '2026-08-01', reason: 'dispute', treatment: 'credit_note', backToStock: true } },
+    expected: 0,
+  },
+  {
+    name: 'a partial return comes off by the returned volume',
+    sale: { status: 'returned', volumeLiters: 1000, resolution: { date: '2026-08-01', reason: 'short', treatment: 'no_action', backToStock: false, volumeReturned: 300 } },
+    expected: 700,
+  },
+  {
+    name: 'a legacy written-off return still comes off sales',
+    sale: { status: 'returned', volumeLiters: 1000, resolution: { date: '2026-08-01', reason: 'spillage', treatment: 'written_off' } },
+    expected: 0,
+  },
 ]
 
 const PURCHASE_CASES: { name: string; purchase: Partial<Purchase>; expected: number }[] = [
@@ -52,7 +92,11 @@ const PURCHASE_CASES: { name: string; purchase: Partial<Purchase>; expected: num
 ]
 
 describe('client stock rules', () => {
-  it.each(SALE_CASES)('netSaleVolume: $name', ({ sale, expected }) => {
+  it.each(SALE_CASES)('stockSaleVolume: $name', ({ sale, expected }) => {
+    expect(stockSaleVolume(sale as Sale)).toBe(expected)
+  })
+
+  it.each(NET_SALES_CASES)('netSaleVolume: $name', ({ sale, expected }) => {
     expect(netSaleVolume(sale as Sale)).toBe(expected)
   })
 
@@ -60,10 +104,11 @@ describe('client stock rules', () => {
     expect(receivedVolume(purchase as Purchase)).toBe(expected)
   })
 
-  it('only counts a restock when the treatment says so', () => {
+  it('only counts a restock when the fuel came back', () => {
     const base = { status: 'returned', volumeLiters: 100 } as Partial<Sale>
     expect(restockedVolume({ ...base, resolution: { date: 'x', reason: 'y', treatment: 'restocked' } } as Sale)).toBe(100)
     expect(restockedVolume({ ...base, resolution: { date: 'x', reason: 'y', treatment: 'refunded' } } as Sale)).toBe(0)
+    expect(restockedVolume({ ...base, resolution: { date: 'x', reason: 'y', treatment: 'refunded', backToStock: true } } as Sale)).toBe(100)
     expect(restockedVolume({ status: 'fulfilled', volumeLiters: 100 } as Sale)).toBe(0)
   })
 })

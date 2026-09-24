@@ -125,3 +125,103 @@ describe('amending a parked input', () => {
     expect(res?.status).toBe(422)
   })
 })
+
+/**
+ * Undoing a decision. A mistaken approval has already posted a record, so the
+ * route has to unwind that from the approval's own audit row - and refuse when
+ * somebody has worked on the record since.
+ */
+const DECIDED = {
+  ...PARKED,
+  status: 'approved',
+  decided_by: 'seat-admin', decided_by_name: 'Admin', decided_at: '2026-09-02T00:00:00.000Z',
+}
+
+function reverseDb(row: Record<string, unknown>, opts: { approvalRow?: Record<string, unknown> | null; later?: Record<string, unknown> | null; current?: Record<string, unknown> | null } = {}) {
+  const sql: { text: string; binds: unknown[] }[] = []
+  const db = {
+    prepare(text: string) {
+      const stmt = {
+        binds: [] as unknown[],
+        bind(...binds: unknown[]) { stmt.binds = binds; sql.push({ text, binds }); return stmt },
+        first: async () => {
+          if (text.startsWith('SELECT * FROM approvals')) return row
+          if (text.includes("action = 'approve'")) return opts.approvalRow === undefined ? { id: 7, at: '2026-09-02T00:00:00.000Z', changes: JSON.stringify({ volumeLiters: [null, 20000], warehouseId: [null, 'wh-cavite'] }) } : opts.approvalRow
+          if (text.includes("action != 'reverse'")) return opts.later ?? null
+          if (text.startsWith('SELECT data FROM records')) return opts.current ? { data: JSON.stringify(opts.current) } : null
+          return null
+        },
+        all: async () => ({ results: [] }),
+        run: async () => ({ success: true }),
+      }
+      return stmt
+    },
+    // Notifications fan out through batch; the statements were already
+    // captured by bind() above, so this only has to not throw.
+    batch: async () => [],
+  }
+  return { db: db as unknown as D1Database, sql }
+}
+
+const reverse = (db: D1Database, me: Seat, body: unknown = {}) =>
+  handleApprovals(db, ['approvals', 'ap1', 'reverse'], 'POST', new URL('http://x/api/approvals/ap1/reverse'),
+    new Request('http://x/api/approvals/ap1/reverse', { method: 'POST', body: JSON.stringify(body) }), me)
+
+describe('undoing a decision', () => {
+  it('refuses a seat that cannot approve, and a request not yet decided', async () => {
+    expect((await reverse(reverseDb(DECIDED).db, seat({ isAdmin: false, canApprove: false })))?.status).toBe(403)
+    expect((await reverse(reverseDb(PARKED).db, seat()))?.status).toBe(409)
+  })
+
+  it('lets only an admin or the deciding approver undo it', async () => {
+    const other = seat({ id: 'seat-other', isAdmin: false, canApprove: true })
+    expect((await reverse(reverseDb(DECIDED).db, other))?.status).toBe(403)
+    const decider = seat({ id: 'seat-admin', isAdmin: false, canApprove: true })
+    expect((await reverse(reverseDb(DECIDED).db, decider))?.status).toBe(200)
+  })
+
+  it('puts a rejection straight back in the queue', async () => {
+    const { db, sql } = reverseDb({ ...DECIDED, status: 'rejected' })
+    const res = await reverse(db, seat(), { note: 'Rejected the wrong one' })
+    expect(res?.status).toBe(200)
+    const upd = sql.find((s) => s.text.startsWith('UPDATE approvals SET status'))
+    expect(upd?.binds[0]).toBe('pending')
+    expect(sql.some((s) => s.text.startsWith('DELETE FROM records'))).toBe(false)
+    const log = sql.find((s) => s.text.includes('INSERT INTO audit_log'))
+    expect(log?.binds).toContain('reverse')
+    expect(log?.binds.some((b) => typeof b === 'string' && b.includes('Rejected the wrong one'))).toBe(true)
+  })
+
+  it('removes the record an approved create had posted', async () => {
+    const { db, sql } = reverseDb(DECIDED)
+    expect((await reverse(db, seat()))?.status).toBe(200)
+    const del = sql.find((s) => s.text.startsWith('DELETE FROM records'))
+    expect(del?.binds).toEqual(['sales', 'sale-1'])
+    // And tells the submitter it is back in the queue.
+    expect(sql.some((s) => s.text.includes('INSERT INTO notifications'))).toBe(true)
+  })
+
+  it('restores the old field values an approved edit had overwritten', async () => {
+    const { db, sql } = reverseDb(
+      { ...DECIDED, action: 'update' },
+      {
+        approvalRow: { id: 7, at: '2026-09-02T00:00:00.000Z', changes: JSON.stringify({ volumeLiters: [15000, 20000], notes: [null, 'rushed'] }) },
+        current: { id: 'sale-1', volumeLiters: 20000, notes: 'rushed', pricePerLiter: 42 },
+      },
+    )
+    expect((await reverse(db, seat()))?.status).toBe(200)
+    const put = sql.find((s) => s.text.startsWith('INSERT INTO records'))
+    const saved = JSON.parse(put?.binds[2] as string)
+    expect(saved.volumeLiters).toBe(15000)
+    expect(saved.pricePerLiter).toBe(42)
+    expect('notes' in saved).toBe(false)
+  })
+
+  it('refuses to unwind over work done on the record since', async () => {
+    const { db, sql } = reverseDb(DECIDED, { later: { seat_name: 'Rey Mendoza', action: 'update', at: '2026-09-03T00:00:00.000Z' } })
+    const res = await reverse(db, seat())
+    expect(res?.status).toBe(409)
+    expect(await res?.text()).toContain('Rey Mendoza')
+    expect(sql.some((s) => s.text.startsWith('UPDATE approvals'))).toBe(false)
+  })
+})

@@ -18,6 +18,16 @@ const HIDDEN = new Set([
 
 /** Labels worth saying properly. Anything absent is prettified from its key. */
 const LABELS: Record<string, string> = {
+  by: 'By',
+  byName: 'By',
+  at: 'At',
+  onBehalfOf: 'On behalf of',
+  recordedBy: 'Recorded by',
+  completedBy: 'Completed by',
+  haulerId: 'Hauler',
+  saleId: 'Sale',
+  purchaseId: 'Purchase',
+  deliveryId: 'Trip',
   volumeLiters: 'Volume',
   volumeReceivedLiters: 'Volume received',
   pricePerLiter: 'Price per litre',
@@ -36,6 +46,12 @@ const LABELS: Record<string, string> = {
   scheduleDate: 'Scheduled for',
   referenceNo: 'Reference no.',
   plateNumber: 'Plate number',
+  productLabel: 'Product name',
+  hauler: 'Hauler',
+  agentName: 'Sales agent',
+  agentContact: 'Agent contact',
+  depotName: 'Loading depot',
+  depotAddress: 'Depot address',
 }
 
 /** Which table an id field points at, so it can be shown as a name. */
@@ -43,7 +59,7 @@ const REFERENCES: Record<string, TableName> = {
   warehouseId: 'warehouses',
   supplierId: 'suppliers',
   customerId: 'customers',
-  agentId: 'personnel',
+  agentId: 'agents',
   collectorId: 'personnel',
   driverId: 'personnel',
   loaderId: 'personnel',
@@ -73,9 +89,9 @@ const ENUMS: Record<string, readonly string[]> = {
   'purchases.status': ['ordered', 'received'],
   'deliveries.status': ['scheduled', 'loading', 'in_transit', 'delivered', 'failed'],
   'sales.fulfillment': ['pickup', 'delivery'],
-  'purchases.fulfillment': ['pickup', 'delivered'],
+  'purchases.fulfillment': ['pickup', 'delivered', 'hauler'],
   '*.paymentMode': ['cash', 'check', 'bank_transfer'],
-  '*.status': ['pending', 'collected', 'bounced', 'cancelled'],
+  '*.status': ['pending', 'collected', 'deposited', 'cleared', 'bounced', 'cancelled'],
 }
 
 /** The options for a field, or null when it is not a closed set. */
@@ -98,7 +114,7 @@ const GROUPS: Record<string, string> = {
   status: 'Order', clientPoReferenceNo: 'Order', referenceNo: 'Order',
   scheduleDate: 'Schedule', scheduleTime: 'Schedule', fulfillment: 'Schedule',
   deliveryAddress: 'Schedule', address: 'Schedule',
-  paymentMode: 'Payment', bankAccountId: 'Payment', installments: 'Payment',
+  paymentMode: 'Payment', bankAccountId: 'Payment', installments: 'Payment', hauler: 'Schedule',
   creditTermDays: 'Payment',
 }
 
@@ -151,6 +167,7 @@ const DEPARTMENTS: Record<string, string> = {
   trucks: 'Trips',
   customers: 'Accounts',
   suppliers: 'Accounts',
+  haulers: 'Stock',
   supplierQuotes: 'Accounts',
   personnel: 'HR',
   payrollRuns: 'HR',
@@ -166,6 +183,29 @@ export function prettify(key: string): string {
 
 export const labelFor = (key: string) => LABELS[key] ?? prettify(key)
 export const referenceFor = (key: string): TableName | null => REFERENCES[key] ?? null
+
+/**
+ * Ids that are shown but never edited - stage stamps, who recorded a return,
+ * which sale a trip belongs to. Kept apart from REFERENCES so the approval
+ * drawer does not grow pickers for them; the history dialog resolves these to
+ * a name and never prints the id itself.
+ */
+const DISPLAY_REFERENCES: Record<string, TableName> = {
+  by: 'seats',
+  recordedBy: 'seats',
+  completedBy: 'seats',
+  seatId: 'seats',
+  onBehalfOf: 'personnel',
+  haulerId: 'haulers',
+  saleId: 'sales',
+  purchaseId: 'purchases',
+  deliveryId: 'deliveries',
+}
+export const displayReferenceFor = (key: string): TableName | null => REFERENCES[key] ?? DISPLAY_REFERENCES[key] ?? null
+
+/** Does this key hold a record id? Such a value is resolved to a name or
+ * withheld - an id on screen tells a person nothing and is not theirs to see. */
+export const isIdField = (key: string) => key in REFERENCES || key in DISPLAY_REFERENCES || /(^id$|Id$|ById$)/.test(key)
 
 export type FieldKind = 'reference' | 'number' | 'boolean' | 'date' | 'text' | 'complex'
 

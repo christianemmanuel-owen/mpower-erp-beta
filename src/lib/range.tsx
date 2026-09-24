@@ -7,10 +7,16 @@ function iso(d: Date) {
 
 export const presets = [
   { key: 'today', label: 'Today', days: 0 },
-  { key: '7d', label: 'Last 7 days', days: 6 },
-  { key: '30d', label: 'Last 30 days', days: 29 },
-  { key: '90d', label: 'Last 90 days', days: 89 },
+  { key: '7d', label: '7D', days: 6 },
+  { key: '15d', label: '15D', days: 14 },
+  { key: '30d', label: '30D', days: 29 },
+  { key: '90d', label: '90D', days: 89 },
 ] as const
+
+/** How many calendar days a range spans, for "vs the 7 days before". */
+export function rangeDays(range: DateRange): number {
+  return Math.round((Date.parse(range.to) - Date.parse(range.from)) / 86_400_000) + 1
+}
 
 interface RangeCtx {
   range: DateRange
@@ -27,7 +33,7 @@ export function RangeProvider({ children }: { children: ReactNode }) {
 
   const range = useMemo<DateRange>(() => {
     if (preset === 'custom' && custom) return custom
-    const p = presets.find((x) => x.key === preset) ?? presets[2]
+    const p = presets.find((x) => x.key === preset) ?? presets.find((x) => x.key === '30d')!
     const to = new Date()
     const from = new Date()
     from.setDate(from.getDate() - p.days)
@@ -67,7 +73,7 @@ export function RangePicker() {
         {presets.map((p) => (
           <option key={p.key} value={p.key}>{p.label}</option>
         ))}
-        <option value="custom">Custom range</option>
+        <option value="custom">Custom</option>
       </select>
       {preset === 'custom' && (
         <span className="flex items-center gap-1 text-[13px]">

@@ -17,6 +17,7 @@ import { validateRecord } from './validate'
 import * as audit from './audit'
 import * as notifications from './notifications'
 import * as stock from './stock'
+import { fulfilOnDelivery } from './fulfilment'
 
 /**
  * Which tables need approval - Secondary Feature 2.1.
@@ -214,21 +215,74 @@ async function amendedFields(db: D1Database, row: ReturnType<typeof toRow>): Pro
   return [...fields]
 }
 
-/** Applies an approved write to `records`. */
-async function apply(db: D1Database, row: ReturnType<typeof toRow>): Promise<Rec | null> {
+/** Applies an approved write to `records`. Returns what was there before as
+ * well as what is there now, so the approval's audit row carries the full
+ * before/after - which is what an undo reads back. */
+async function apply(db: D1Database, row: ReturnType<typeof toRow>): Promise<{ before: Rec | null; after: Rec | null }> {
   if (row.action === 'delete') {
+    const before = await getRow(db, row.tbl, row.recordId)
     await db.prepare('DELETE FROM records WHERE tbl = ? AND id = ?').bind(row.tbl, row.recordId).run()
-    return null
+    return { before, after: null }
   }
   if (row.action === 'create') {
     await putStmt(db, row.tbl, row.payload).run()
-    return row.payload
+    return { before: null, after: row.payload }
   }
   const existing = await getRow(db, row.tbl, row.recordId)
-  if (!existing) return null
+  if (!existing) return { before: null, after: null }
   const merged: Rec = { ...existing, ...row.payload, id: row.recordId, updatedAt: now() }
   await putStmt(db, row.tbl, merged).run()
-  return merged
+  return { before: existing, after: merged }
+}
+
+/**
+ * Undoing a decision - the approved write is reversed from the approval's own
+ * audit row, which holds the field-level before/after of what it posted.
+ *
+ * Refused when anything else has touched the record since: an edit, an upload,
+ * a later approval. Unwinding on top of someone's later work would replace it
+ * with a guess, and the honest answer there is "undo it by hand".
+ */
+async function unapply(db: D1Database, row: ReturnType<typeof toRow>): Promise<string | null> {
+  const approval = await db
+    .prepare("SELECT id, at, changes FROM audit_log WHERE action = 'approve' AND tbl = ? AND record_id = ? AND at >= ? ORDER BY at DESC LIMIT 1")
+    .bind(row.tbl, row.recordId, row.decidedAt ?? row.requestedAt)
+    .first<{ id: number; at: string; changes: string | null }>()
+  if (!approval) return 'The approval left no record of what it changed, so it can’t be undone automatically.'
+
+  const later = await db
+    .prepare("SELECT seat_name, action, at FROM audit_log WHERE tbl = ? AND record_id = ? AND at > ? AND action != 'reverse' ORDER BY at ASC LIMIT 1")
+    .bind(row.tbl, row.recordId, approval.at)
+    .first<{ seat_name: string; action: string; at: string }>()
+  if (later) {
+    return `${later.seat_name} ${later.action === 'upload' ? 'uploaded a document to' : later.action === 'delete' ? 'deleted' : 'edited'} this record after it was approved, so undo it by hand rather than over their work.`
+  }
+
+  let changes: Record<string, [unknown, unknown]> = {}
+  try { changes = approval.changes ? JSON.parse(approval.changes) : {} } catch { changes = {} }
+
+  if (row.action === 'create') {
+    await db.prepare('DELETE FROM records WHERE tbl = ? AND id = ?').bind(row.tbl, row.recordId).run()
+    return null
+  }
+  if (row.action === 'delete') {
+    const restored: Rec = { id: row.recordId }
+    for (const [k, [before]] of Object.entries(changes)) if (before !== null && before !== undefined) restored[k] = before
+    restored.updatedAt = now()
+    await putStmt(db, row.tbl, restored).run()
+    return null
+  }
+  const current = await getRow(db, row.tbl, row.recordId)
+  if (!current) return 'The record this approval changed is no longer there.'
+  const restored: Rec = { ...current }
+  for (const [k, [before]] of Object.entries(changes)) {
+    if (before === null || before === undefined) delete restored[k]
+    else restored[k] = before
+  }
+  restored.id = row.recordId
+  restored.updatedAt = now()
+  await putStmt(db, row.tbl, restored).run()
+  return null
 }
 
 /**
@@ -237,6 +291,7 @@ async function apply(db: D1Database, row: ReturnType<typeof toRow>): Promise<Rec
  *   PATCH /api/approvals/:id       { payload }  amend a parked submission (approver)
  *   POST /api/approvals/:id/approve  { note? }
  *   POST /api/approvals/:id/reject   { note? }
+ *   POST /api/approvals/:id/reverse  { note? }   undo a decision (admin, or the approver who made it)
  *   DELETE /api/approvals/:id        withdraw your own pending request
  *   GET  /api/approvals/rules      → the configured rules + what's configurable
  *   PUT  /api/approvals/rules      { tables, minAmount? }   (admin)
@@ -363,8 +418,12 @@ export async function handleApprovals(
     const status = decision === 'approve' ? 'approved' : 'rejected'
 
     let applied: Rec | null = null
+    let before: Rec | null = null
     if (decision === 'approve') {
-      applied = await apply(db, row)
+      ;({ before, after: applied } = await apply(db, row))
+      // The same consequence the direct PUT has: a delivery landing as
+      // delivered closes out its sale, whoever approved it.
+      if (row.tbl === 'deliveries') await fulfilOnDelivery(db, me, before, applied)
       // An approved purchase or sale is the moment the stock actually moves -
       // the submission didn't move it, so this is where 2.3 has to look.
       if (stock.STOCK_TABLES.has(row.tbl)) {
@@ -379,11 +438,16 @@ export async function handleApprovals(
       .bind(status, me.id, me.name, now(), body.note ?? null, id)
       .run()
 
+    // The approval row carries what it posted - before/after, or the whole
+    // record for a create or delete - so the history shows it and an undo
+    // can read it back.
     await audit.record(db, {
       seat: me,
       action: decision === 'approve' ? 'approve' : 'reject',
       tbl: row.tbl,
       recordId: row.recordId,
+      before: decision === 'approve' ? before ?? {} : undefined,
+      after: decision === 'approve' ? applied ?? {} : undefined,
       summary: `${decision === 'approve' ? 'approved' : 'rejected'} ${row.requestedByName}’s ${row.summary ?? 'input'}`,
     })
     // If an approver corrected it on the way through, the record that just
@@ -404,6 +468,50 @@ export async function handleApprovals(
     })
 
     return json({ ok: true, status, record: applied })
+  }
+
+  /**
+   * Undo a decision made by mistake. The request goes back to the queue as if
+   * it had never been decided; an approved write is unwound (see unapply).
+   * Admins may undo any decision; another approver only their own.
+   */
+  if (decision === 'reverse' && method === 'POST') {
+    if (!mayApprove(me)) return err(403, 'Only an approver can undo a decision.')
+    if (row.status === 'pending') return err(409, 'This request hasn’t been decided yet.')
+    if (row.decidedBy !== me.id && !me.isAdmin) return err(403, 'Only the approver who decided this, or an administrator, can undo it.')
+    const body = (await request.json().catch(() => ({}))) as { note?: string }
+
+    if (row.status === 'approved') {
+      const problem = await unapply(db, row)
+      if (problem) return err(409, problem)
+      if (stock.STOCK_TABLES.has(row.tbl)) {
+        await stock.checkThresholds(db, { warehouseId: row.payload.warehouseId as string | undefined })
+      }
+    }
+
+    await db
+      .prepare('UPDATE approvals SET status = ?, decided_by = NULL, decided_by_name = NULL, decided_at = NULL, decision_note = ? WHERE id = ?')
+      .bind('pending', body.note ?? null, id)
+      .run()
+
+    await audit.record(db, {
+      seat: me,
+      action: 'reverse',
+      tbl: row.tbl,
+      recordId: row.recordId,
+      summary: `undid ${row.decidedByName === me.name ? 'their' : `${row.decidedByName}’s`} ${row.status === 'approved' ? 'approval' : 'rejection'} of ${row.requestedByName}’s ${row.summary ?? 'input'}${body.note ? ` - ${body.note}` : ''}`,
+    })
+
+    await notifications.emit(db, { seatIds: [row.requestedBy] }, {
+      kind: 'approval_result',
+      title: 'A decision on your input was undone',
+      body: `${row.summary ?? 'Your input'} is back in the queue${body.note ? ` - ${body.note}` : ''}.`,
+      link: '/settings/approvals',
+      tbl: row.tbl,
+      recordId: row.recordId,
+    })
+
+    return json({ ok: true, status: 'pending' })
   }
 
   if (parts.length === 2 && method === 'DELETE') {

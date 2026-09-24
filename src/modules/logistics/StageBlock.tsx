@@ -13,8 +13,11 @@ import type { StageState } from '../../lib/tripStages'
  * address changes after dispatch and someone has to fix it. Nothing here locks.
  */
 export default function StageBlock({
-  id, title, owner, state, stamp, stampLabel, summary, action, children,
+  id, title, owner, state, stamp, stampLabel, summary, action, children, defaultOpen,
 }: {
+  /** Start open regardless of state - a finished stage with something
+   *  wrong in it (a ban, a gap) is shown, not summarised. */
+  defaultOpen?: boolean
   id: string
   title: string
   owner: string
@@ -29,7 +32,7 @@ export default function StageBlock({
   action?: ReactNode
   children: ReactNode
 }) {
-  const [open, setOpen] = useState(state === 'now')
+  const [open, setOpen] = useState(defaultOpen ?? state === 'now')
   const chevron = open ? <ChevronDown size={13} /> : <ChevronRight size={13} />
 
   return (

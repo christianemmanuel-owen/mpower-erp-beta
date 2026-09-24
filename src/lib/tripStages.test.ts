@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { CHECKLIST_ITEMS } from './logistics'
 import {
   advancePatch, documentSlots, gapSentence, receiptSlot, stageCompletedBy, stageGaps, stageOf, stageState,
 } from './tripStages'
@@ -17,10 +18,11 @@ const trip = (over: Partial<Delivery> = {}): Delivery => ({
   ...over,
 })
 
+const sig = { name: 'x', image: 'data:image/png;base64,', at: '2026-09-17T00:00:00.000Z' }
+/** Every box ticked and every signature drawn. */
 const ticked = (): PreDispatchChecklist => ({
-  identificationVerified: true, loadConfirmed: true, gpsPresent: true, fuelSensorPresent: true,
-  smartLockPresent: true, fullTankConfirmed: true, engineInspected: true, partsInspected: true,
-  tiresInspected: true, bodyCamPresent: true,
+  ...(Object.fromEntries(CHECKLIST_ITEMS.map((i) => [i.key, true])) as unknown as PreDispatchChecklist),
+  signatures: { driver: sig, pahinante: sig, dispatcher: sig },
 })
 
 describe('trip stages', () => {
@@ -58,15 +60,20 @@ describe('trip stages', () => {
     expect(stageGaps(trip(), 'plan', false)).toEqual(['a truck', 'a driver'])
     expect(stageGaps(trip({ truckId: 't1', driverId: 'p1' }), 'plan', false)).toEqual([])
 
-    expect(stageGaps(trip({ checklist: { ...ticked(), tiresInspected: false } }), 'dispatch', false))
+    // The receipt number is a dispatch matter now - it goes out with the truck.
+    const dr = { deliveryReceipt: { referenceNo: 'DR-1' } }
+    expect(stageGaps(trip({ documents: dr, checklist: { ...ticked(), tiresInspected: false } }), 'dispatch', false))
       .toEqual(['1 checklist item'])
-    expect(stageGaps(trip({ checklist: ticked() }), 'dispatch', false)).toEqual([])
+    expect(stageGaps(trip({ documents: dr, checklist: { ...ticked(), signatures: {} } }), 'dispatch', false))
+      .toEqual(['the crew signatures'])
+    expect(stageGaps(trip({ documents: dr, checklist: ticked() }), 'dispatch', false)).toEqual([])
+    expect(stageGaps(trip({ checklist: ticked() }), 'dispatch', false)).toEqual(['a delivery receipt number'])
     // A pickup from a client dispatches no loaded vehicle, so it has no list.
     expect(stageGaps(trip({ movementType: 'pickup_from_client' }), 'dispatch', false)).toEqual([])
 
-    expect(stageGaps(trip(), 'delivery', false)).toEqual(['a receipt number', 'the signed copy'])
-    expect(stageGaps(trip({ documents: { deliveryReceipt: { referenceNo: 'DR-1' } } }), 'delivery', true))
-      .toEqual([])
+    // At the far end only the signing is left: who signed, and the signed copy.
+    expect(stageGaps(trip({ documents: dr }), 'delivery', false)).toEqual(['who signed', 'the signed copy'])
+    expect(stageGaps(trip({ documents: dr, receivedBy: 'J. Reyes' }), 'delivery', true)).toEqual([])
   })
 
   it('says the gaps as a sentence', () => {

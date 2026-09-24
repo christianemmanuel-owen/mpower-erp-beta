@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import { Field, GhostButton, Input, Textarea } from '../../components/ui'
-import { CHECKLIST_ITEMS, MOVEMENT_LABELS, checklistProgress, emptyChecklist, movementType } from '../../lib/logistics'
+import SignaturePad from '../../components/SignaturePad'
+import { CHECKLIST_GROUPS, CHECKLIST_ITEMS, CHECKLIST_SIGNATORIES, MOVEMENT_LABELS, checklistProgress, emptyChecklist, movementType } from '../../lib/logistics'
 import { allocateReference } from '../../lib/attachments'
 import { printDocument } from '../../lib/printDoc'
 import { fmtCurrency, fmtDate } from '../../lib/format'
+import { useAuth } from '../../lib/auth'
 import type { Delivery, Personnel, PreDispatchChecklist, Truck } from '../../data/types'
 
 /**
@@ -28,6 +30,7 @@ export default function ChecklistEditor({ draft, personnel, trucks, onChange, on
   onNotice: (message: string) => void
 }) {
   const [allocating, setAllocating] = useState(false)
+  const { seat } = useAuth()
   const checklist = draft.checklist ?? emptyChecklist()
   const progress = checklistProgress(draft.checklist)
   const name = (id?: string) => personnel.find((p) => p.id === id)?.name ?? '—'
@@ -36,11 +39,14 @@ export default function ChecklistEditor({ draft, personnel, trucks, onChange, on
   const toggle = (key: keyof PreDispatchChecklist, value: boolean) =>
     onChange({ ...checklist, [key]: value })
 
-  /** Ticks everything at once. Offered because the honest common case is a clean
-   * vehicle and ten identical ticks - but it fills the visible boxes rather than
-   * bypassing them, so what gets signed is still what was reviewed. */
-  const tickAll = () =>
-    onChange({ ...checklist, ...Object.fromEntries(CHECKLIST_ITEMS.map((i) => [i.key, true])) })
+  // No "tick all". Every box starts empty and is ticked by hand - the client's
+  // rule, and the only way the signed slip means somebody looked.
+
+  const signatoryName = (role: 'driver' | 'pahinante' | 'dispatcher') =>
+    role === 'driver' ? name(checklist.driverId ?? draft.driverId)
+    : role === 'pahinante' ? name(checklist.pahinanteId ?? draft.pahinanteId)
+    // Dispatch personnel is whoever is at the desk - the signed-in seat.
+    : (seat?.name ?? name(checklist.managerId ?? draft.managerId))
 
   async function printSlip() {
     let referenceNo = checklist.referenceNo
@@ -80,18 +86,24 @@ export default function ChecklistEditor({ draft, personnel, trucks, onChange, on
             { label: 'Scheduled', value: `${fmtDate(draft.scheduleDate)}${draft.scheduleTime ? ` ${draft.scheduleTime}` : ''}` },
           ],
         },
-        {
-          kind: 'checklist',
-          items: CHECKLIST_ITEMS.map((i) => ({ label: i.label, checked: Boolean(checklist[i.key]) })),
-        },
+        ...CHECKLIST_GROUPS.map((g) => ({
+          kind: 'checklist' as const,
+          heading: g,
+          columns: 2 as const,
+          items: CHECKLIST_ITEMS.filter((i) => i.group === g).map((i) => ({ label: i.label, checked: Boolean(checklist[i.key]) })),
+        })),
         ...(checklist.notes ? [{ kind: 'note' as const, text: checklist.notes }] : []),
         {
           kind: 'signatures',
           signatories: [
-            { role: 'Driver', name: name(checklist.driverId ?? draft.driverId) },
+            ...CHECKLIST_SIGNATORIES.map((sig) => ({
+              role: sig.label,
+              name: checklist.signatures?.[sig.role]?.name || signatoryName(sig.role),
+              image: checklist.signatures?.[sig.role]?.image,
+              signedAt: checklist.signatures?.[sig.role]?.at,
+            })),
             { role: 'Loading personnel', name: name(checklist.loaderId ?? draft.loaderId) },
             { role: 'Guard on duty', name: name(checklist.guardId ?? draft.guardId) },
-            { role: 'Manager', name: name(checklist.managerId ?? draft.managerId) },
           ],
         },
       ],
@@ -135,27 +147,71 @@ export default function ChecklistEditor({ draft, personnel, trucks, onChange, on
           themselves are the list. */}
       <div className="overflow-hidden rounded-[8px] border border-line">
         <div className="flex items-center gap-3 border-b border-linesoft bg-paper px-[12px] py-[7px]">
-          <p className="m-0 font-meta text-[10px] font-semibold uppercase tracking-[.09em] text-mut">Checklist items</p>
+          <p className="m-0 font-meta text-[10px] font-semibold uppercase tracking-[.09em] text-mut">Checklist</p>
           <span className="font-meta text-[12px] text-faint">{progress.answered} of {progress.total} ticked</span>
-          <span className="ml-auto">
-            <GhostButton onClick={tickAll}>Tick all</GhostButton>
-          </span>
         </div>
 
-        {CHECKLIST_ITEMS.map((item) => (
-          <label
-            key={item.key}
-            className="flex cursor-pointer items-center gap-[10px] border-b border-linesoft px-[12px] py-[7px] text-[13px] last:border-b-0 hover:bg-paper"
-          >
-            <input
-              type="checkbox"
-              checked={Boolean(checklist[item.key])}
-              onChange={(e) => toggle(item.key, e.target.checked)}
-              className="h-[15px] w-[15px] cursor-pointer accent-ink"
-            />
-            {item.label}
-          </label>
+        {/* Four blocks, two columns each: the crew walk the vehicle first
+            (BLOWBAGETS), then the devices, then what they carry, then the load. */}
+        {CHECKLIST_GROUPS.map((g) => (
+          <div key={g} className="border-b border-linesoft last:border-b-0">
+            <p className="m-0 bg-paper/60 px-[12px] py-[5px] font-meta text-[10px] font-semibold uppercase tracking-[.09em] text-sec">{g}</p>
+            <div className="grid grid-cols-2">
+              {CHECKLIST_ITEMS.filter((i) => i.group === g).map((item) => (
+                <label
+                  key={item.key}
+                  className="flex cursor-pointer items-center gap-[10px] px-[12px] py-[6px] text-[13px] hover:bg-paper"
+                >
+                  <input
+                    type="checkbox"
+                    checked={Boolean(checklist[item.key])}
+                    onChange={(e) => toggle(item.key, e.target.checked)}
+                    className="h-[15px] w-[15px] cursor-pointer accent-ink"
+                  />
+                  {item.label}
+                </label>
+              ))}
+            </div>
+          </div>
         ))}
+
+        {/* The crew sign on screen - driver, pahinante, dispatch personnel -
+            and the slip prints with the signatures on it. */}
+        <div className="border-t border-line bg-paper px-[12px] py-[10px]">
+          <div className="mb-[8px] flex items-baseline gap-3">
+            <p className="m-0 font-meta text-[10px] font-semibold uppercase tracking-[.09em] text-mut">Signatures</p>
+            <span className="font-meta text-[12px] text-faint">
+              {progress.signed ? 'All signed' : `${progress.missingSignatures.join(', ')} still to sign`}
+            </span>
+          </div>
+          {/* One signer per row: who on the left, the pad on the right. Three
+              pads side by side left each one too narrow for a name and a
+              pair of buttons at once. */}
+          <div className="divide-y divide-linesoft">
+            {CHECKLIST_SIGNATORIES.map((sig) => {
+              const v = checklist.signatures?.[sig.role]
+              const name = signatoryName(sig.role)
+              return (
+                <div key={sig.role} className="grid grid-cols-[170px_minmax(0,360px)] items-start gap-x-5 py-[10px] first:pt-0 last:pb-0">
+                  <div className="pt-[2px]">
+                    <p className="m-0 font-meta text-[11px] font-semibold uppercase tracking-[.08em] text-mut">{sig.label}</p>
+                    <p className="m-0 mt-[3px] truncate text-[13px] font-semibold leading-[1.25]">{name || 'Not assigned'}</p>
+                    <p className={`m-0 mt-[2px] font-meta text-[12px] ${v ? 'text-tealtext' : 'text-faint'}`}>
+                      {v ? `Signed ${fmtDate(v.at)}` : 'Still to sign'}
+                    </p>
+                  </div>
+                  <SignaturePad
+                    layout="row"
+                    label={sig.label}
+                    name={name}
+                    value={v}
+                    onChange={(sv) => onChange({ ...checklist, signatures: { ...(checklist.signatures ?? {}), [sig.role]: sv } })}
+                  />
+                </div>
+              )
+            })}
+          </div>
+        </div>
 
         <div className="flex items-center gap-3 border-t border-line bg-paper px-[12px] py-[8px]">
           <GhostButton onClick={printSlip} disabled={allocating}>

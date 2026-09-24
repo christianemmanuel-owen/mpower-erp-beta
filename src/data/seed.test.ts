@@ -79,11 +79,49 @@ describe('makeDemoData', () => {
     expect(overridden.length).toBeGreaterThan(0)
     for (const i of overridden) expect(collectorIds.has(i.collectorId!)).toBe(true)
 
-    // Collected installments know when they were collected; open/cancelled ones don't.
+    /**
+     * The custody chain holds: each stage carries the timestamps of the stages
+     * it must have passed through, and none of the ones it hasn't.
+     *
+     * A record claiming to be cleared with no deposit behind it, or in hand
+     * with a clearing date, is money that skipped a pair of hands - exactly
+     * the thing Treasury exists to make impossible.
+     */
     for (const i of data.sales.flatMap((s) => s.installments)) {
-      if (i.status === 'collected') expect(i.collectedAt).toBeTruthy()
+      const collected = i.status === 'collected' || i.status === 'deposited' || i.status === 'cleared'
+      if (collected || i.status === 'bounced') expect(i.collectedAt).toBeTruthy()
       else expect(i.collectedAt).toBeUndefined()
+
+      // Anything in clearing is at the bank by definition. Cleared money need
+      // not be: cash handed over the counter is money the moment it arrives,
+      // with no lodgement in between - only instruments pass through a bank.
+      if (i.status === 'deposited') expect(i.depositedAt).toBeTruthy()
+      if (i.depositedAt) expect(i.status === 'deposited' || i.status === 'cleared').toBe(true)
+
+      if (i.status === 'cleared') expect(i.clearedAt).toBeTruthy()
+      else expect(i.clearedAt).toBeUndefined()
+
+      // Nobody collects, banks or clears money in the future. A post-dated
+      // check is the one thing here that legitimately carries a future date,
+      // and it is the date on the instrument, not on anybody's action.
+      for (const when of [i.collectedAt, i.depositedAt, i.clearedAt]) {
+        if (when) expect(Date.parse(when)).toBeLessThanOrEqual(Date.now())
+      }
     }
+
+    // All four money states are represented, or Treasury demo is empty and
+    // the collected-vs-deposited distinction can't be seen at all.
+    const statuses = new Set(data.sales.flatMap((s) => s.installments).map((i) => i.status))
+    for (const want of ['pending', 'collected', 'deposited', 'cleared', 'bounced'] as const) {
+      expect(statuses.has(want)).toBe(true)
+    }
+
+    // And at least one post-dated check is in hand but not yet bankable - the
+    // case the whole treasury was built around.
+    const notYetBankable = data.sales
+      .flatMap((s) => s.installments)
+      .filter((i) => i.status === 'collected' && i.checkDate && Date.parse(i.checkDate) > Date.now())
+    expect(notYetBankable.length).toBeGreaterThan(0)
 
     // A couple of accounts collect somewhere other than the delivery address.
     expect(data.customers.filter((c) => c.collectionAddress).length).toBeGreaterThanOrEqual(2)

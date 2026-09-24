@@ -39,11 +39,17 @@
   --color-ink: #14181b;
   --color-inkcard: #1f242a;
   --color-inkhov: #2c333a;
+  /* Four greys, each a step darker than it was. The old ladder bottomed out
+     at 2.2:1 (faint) and 3.9:1 (mut) on white - under the 4.5:1 that 12-13px
+     text needs, and those two tokens carry usernames, due dates and every
+     meta line. Now: lab 10.2, sec 6.9, mut 5.5, faint 3.5. Faint stays below
+     AA on purpose: it is for hints and placeholders, never for the only copy
+     of a fact. */
   --color-lab: #3a424a;
-  --color-sec: #5f6971;
-  --color-mut: #78828b;
-  --color-faint: #a8b0b7;
-  --color-railidle: #78828b;
+  --color-sec: #525b63;
+  --color-mut: #616a72;
+  --color-faint: #808890;
+  --color-railidle: #616a72;
 
   /* ---- accent: structural only (active nav, links, primary data) ---- */
   --color-teal: #116a63;
@@ -116,6 +122,59 @@ body {
    compiling; delete the class from those files in a later pass. */
 .rise { animation: none; }
 
+/* A screen arriving: one short fade-and-lift on the whole page body when the
+   route changes, not a card-by-card cascade. Fast enough to read as the page
+   settling rather than performing. */
+/* Ends on `transform: none`, not translateY(0): with the fill mode keeping the
+   last frame, a translate that is still a transform makes the faded page the
+   containing block for every position:fixed thing inside it - so the phone's
+   account sheet rose under the tab bar instead of over it. */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.fade-in { animation: fadeUp .22s cubic-bezier(.2,.7,.3,1) both; }
+
+/* While the data is on its way: the page's shape in grey, breathing slowly.
+   Drawn instead of nothing, so a slow connection shows a page loading rather
+   than an app that has stopped. */
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.skeleton {
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--color-fill2) 0%, var(--color-linesoft) 40%, var(--color-fill2) 80%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+/* A sidebar section unfolding: the grid-rows trick, so the height animates
+   without measuring anything. */
+.fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .2s cubic-bezier(.2,.7,.3,1); }
+.fold.open { grid-template-rows: 1fr; }
+.fold > div { min-height: 0; overflow: hidden; }
+
+/* A dialog arriving: the veil fades and the panel settles in from very
+   slightly small. Out is instant - a form you have just saved should be gone. */
+@keyframes veilIn { from { opacity: 0; } to { opacity: 1; } }
+.dlg-veil { animation: veilIn .16s ease-out both; }
+.dlg-panel { animation: popIn .2s cubic-bezier(.2,.7,.3,1) both; }
+
+/* Content that arrived after its skeleton: opacity only, no lift, so a
+   table appearing under a title you were already reading does not jump. */
+@keyframes fadeOnly { from { opacity: 0; } to { opacity: 1; } }
+.fade-only { animation: fadeOnly .18s ease-out both; }
+
+/* Table rows and cards that light on hover do it smoothly. */
+tbody tr { transition: background-color .12s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-in, .fade-only, .skeleton, .dlg-veil, .dlg-panel { animation: none; }
+  .fold { transition: none; }
+  tbody tr { transition: none; }
+}
+
 /* Toasts enter from the corner they live in. Short, and only on the way in -
    a message that animates out is a message you cannot finish reading. */
 @keyframes toastIn {
@@ -125,9 +184,90 @@ body {
 
 .toast-in { animation: toastIn .18s cubic-bezier(.2,.7,.3,1) both; }
 
+/* The tooltip itself is drawn by components/Tooltips.tsx on <body>, so it
+   is never clipped by a table or card. This is only its entrance. */
+@keyframes tipIn { from { opacity: 0; translate: 0 3px; } to { opacity: 1; translate: 0 0; } }
+.tip-pop { animation: tipIn .12s cubic-bezier(.2,.7,.3,1) both; }
+@media (prefers-reduced-motion: reduce) { .tip-pop { animation: none; } }
+
+/* Minutes on a route line in the planner: a chip on the line, the chosen
+   route's in teal, the others in grey. No tooltip arrow - it points at nothing. */
+.route-tip { background: #fff; border: 1px solid var(--color-line); border-radius: 6px; padding: 2px 7px; font-family: var(--font-meta); font-size: 11px; font-weight: 600; color: var(--color-sec); box-shadow: 0 1px 3px rgba(20,24,27,.14); }
+.route-tip::before { display: none; }
+.route-tip-on { background: var(--color-ink); border-color: var(--color-ink); color: #fff; }
+
+/* The full-screen signature pad scales up out of the small one and back. */
+@keyframes sigIn { from { opacity: 0; scale: .94; } to { opacity: 1; scale: 1; } }
+@keyframes sigOut { from { opacity: 1; scale: 1; } to { opacity: 0; scale: .96; } }
+.sig-in { animation: sigIn .2s cubic-bezier(.2,.7,.3,1) both; }
+.sig-out { animation: sigOut .16s cubic-bezier(.4,0,.8,.6) both; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .sig-in, .sig-out { animation: none; } }
+
+/* Anything that takes you somewhere carries the same arrow, and the arrow
+   leans towards where it points while you hover the control (or the row
+   the control sits in). */
+.go-arrow { transition: transform .15s cubic-bezier(.2,.7,.3,1); }
+.go-link:hover .go-arrow, .group:hover .go-arrow, tr:hover > td .go-arrow { transform: translate(1.5px, -1.5px); }
+@media (prefers-reduced-motion: reduce) { .go-arrow { transition: none; } }
+
+/* The profile menu grows up out of the button that opened it: a short
+   fade-and-rise anchored at the bottom-left corner, and its items stagger in
+   a few milliseconds apart so the eye reads them top to bottom. */
+@keyframes menuUp {
+  from { transform: translateY(6px) scale(.97); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+@keyframes menuItem {
+  from { transform: translateX(-4px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.menu-up { transform-origin: bottom left; animation: menuUp .16s cubic-bezier(.2,.7,.3,1) both; }
+/* Closing is the same move in reverse, a touch quicker, and the items do not
+   stagger on the way out - the whole card leaves together. */
+@keyframes menuDown {
+  from { transform: translateY(0) scale(1); opacity: 1; }
+  to { transform: translateY(6px) scale(.97); opacity: 0; }
+}
+.menu-down { transform-origin: bottom left; animation: menuDown .12s cubic-bezier(.4,0,.8,.6) both; pointer-events: none; }
+.menu-down .menu-item { animation: none; }
+.menu-item { animation: menuItem .18s cubic-bezier(.2,.7,.3,1) both; }
+.menu-item:nth-child(2) { animation-delay: 30ms; }
+.menu-item:nth-child(3) { animation-delay: 60ms; }
+.menu-item:nth-child(4) { animation-delay: 90ms; }
+.menu-item:nth-child(5) { animation-delay: 120ms; }
+
+/* A panel that hangs down from the thing that opened it - the bell - is the
+   same move as the profile menu, anchored at its top-right corner instead. */
+@keyframes dropIn {
+  from { transform: translateY(-6px) scale(.97); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+.drop-in { transform-origin: top right; animation: dropIn .16s cubic-bezier(.2,.7,.3,1) both; }
+
+/* The bell itself: a small ring when its count goes up, so a notification
+   that arrives while you are looking elsewhere is seen out of the corner of
+   the eye. Once, not on every poll. */
+@keyframes ring {
+  0%, 100% { transform: rotate(0); }
+  20% { transform: rotate(14deg); }
+  40% { transform: rotate(-12deg); }
+  60% { transform: rotate(8deg); }
+  80% { transform: rotate(-4deg); }
+}
+.bell-ring { transform-origin: top center; animation: ring .6s cubic-bezier(.2,.7,.3,1) both; }
+
+/* The calendar swapping between month and week, or moving a period: the
+   grid fades and slides a touch in the direction of travel. */
+@keyframes slideFromRight { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes slideFromLeft { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
+.slide-from-right { animation: slideFromRight .2s cubic-bezier(.2,.7,.3,1) both; }
+.slide-from-left { animation: slideFromLeft .2s cubic-bezier(.2,.7,.3,1) both; }
+
 @media (prefers-reduced-motion: reduce) {
   .grow { animation: none; }
   .toast-in { animation: none; }
+  .drop-in, .bell-ring, .slide-from-right, .slide-from-left { animation: none; }
+  .menu-up, .menu-down, .menu-item { animation: none; }
   [style*='dockIn'] { animation: none !important; }
 }
 
@@ -160,12 +300,26 @@ body {
    The glyph is lucide's ChevronDown at 2px, in --color-mut, so a dropdown
    matches every other chevron in the app rather than using whichever one the
    platform ships. */
+/* One behaviour for every text box and dropdown: the border darkens under
+   the pointer, and focus adds a soft ring outside the teal border so the
+   active field is found at a glance on a long form. Disabled reads as paper,
+   not as a greyed-out copy of a live control. */
+.ctl {
+  transition: border-color .12s, box-shadow .12s, background-color .12s;
+  box-shadow: 0 1px 1px rgba(20, 24, 27, .04);
+}
+.ctl:hover:not(:disabled):not(:focus) { border-color: var(--color-faint); }
+.ctl:focus { box-shadow: 0 0 0 3px rgba(17, 106, 99, .16); }
+.ctl:disabled { background: var(--color-paper); color: var(--color-sec); box-shadow: none; cursor: default; }
+.ctl::placeholder { color: var(--color-faint); }
+.ctl[aria-invalid='true']:focus { box-shadow: 0 0 0 3px rgba(179, 38, 30, .14); }
+
 select.ctl {
   appearance: none;
   -webkit-appearance: none;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%2378828b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
   background-repeat: no-repeat;
-  background-position: right 11px center;
+  background-position: right 12px center;
   /* Room, so a long option label cannot run under the chevron. */
   padding-right: 32px;
 }
@@ -202,3 +356,105 @@ select.ctl {
   to { transform: translateY(0); opacity: 1; }
 }
 
+
+/* ---- Field (phone) app motion --------------------------------------------
+   The office screens deliberately do not animate (see `.rise` above). The
+   phone app is different: one screen at a time, thumb-driven, and the motion
+   is how a 390px screen says where you came from and where a thing went.
+   Everything here is short (150-250ms), runs on transform and opacity only,
+   and is switched off entirely under prefers-reduced-motion. */
+@keyframes fieldRise {
+  from { transform: translateY(6px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+@keyframes fieldFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes fieldFadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes fieldSlideIn {
+  from { transform: translateX(28px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes fieldSlideOut {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(28px); opacity: 0; }
+}
+@keyframes fieldSheetUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+@keyframes fieldTick {
+  0% { transform: scale(1); }
+  40% { transform: scale(.82); }
+  100% { transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* A screen arriving: a sheet slides in from the right, a list fades. */
+  .field-enter-sheet { animation: fieldSlideIn .22s cubic-bezier(.2,.7,.3,1) both; }
+  .field-enter-list { animation: fieldFadeIn .18s ease-out both; }
+  /* The screen being left, laid over the top while it goes. */
+  .field-leave-sheet { animation: fieldSlideOut .2s cubic-bezier(.4,0,.8,.4) both; }
+  .field-leave-list { animation: fieldFadeOut .12s ease-in both; }
+
+  /* Rows rise in with a small stagger. Capped at the eighth row: below the
+     fold nothing is watching, and a long delay reads as a slow screen. */
+  .field-list > * { animation: fieldRise .22s cubic-bezier(.2,.7,.3,1) both; }
+  .field-list > :nth-child(2) { animation-delay: 25ms; }
+  .field-list > :nth-child(3) { animation-delay: 50ms; }
+  .field-list > :nth-child(4) { animation-delay: 75ms; }
+  .field-list > :nth-child(5) { animation-delay: 100ms; }
+  .field-list > :nth-child(6) { animation-delay: 125ms; }
+  .field-list > :nth-child(7) { animation-delay: 150ms; }
+  .field-list > :nth-child(n+8) { animation-delay: 175ms; }
+
+  .field-sheet-up { animation: fieldSheetUp .24s cubic-bezier(.2,.7,.3,1) both; }
+  /* The to-do rail's done section, rising from the bar that reveals it. */
+  .todo-done-up { animation: fieldRise .2s cubic-bezier(.2,.7,.3,1) both; }
+  .field-backdrop { animation: fieldFadeIn .2s ease-out both; }
+  .field-tick:checked { animation: fieldTick .22s ease-out; }
+
+  /* My tasks. The tick is a span driven by the hidden input before it, so
+     it takes the same pop on :checked through the sibling combinator, and
+     the check inside it draws in a beat later. */
+  input:checked + .task-tick { animation: taskTickPop .28s cubic-bezier(.2,.7,.3,1); }
+  input:checked + .task-tick > svg { animation: taskCheckIn .2s .08s cubic-bezier(.2,.7,.3,1) both; }
+  /* The strike is a line drawn across the words, not a style that appears.
+     A background gradient rather than a pseudo-element so a wrapped item gets
+     a line on each of its lines (box-decoration-break clones it per fragment). */
+  .task-text {
+    background: linear-gradient(currentColor, currentColor) no-repeat 0 56% / 0% 1.5px;
+    -webkit-box-decoration-break: clone; box-decoration-break: clone;
+    transition: background-size .22s cubic-bezier(.2,.7,.3,1) .06s;
+  }
+  .task-text.is-done { background-size: 100% 1.5px; }
+  /* A ticked row stays put long enough to be seen done, then folds away to
+     where it now belongs. Height is animated through the grid trick so the
+     rows below close up rather than jump. */
+  .task-row { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .22s cubic-bezier(.4,0,.8,.4), opacity .18s ease-in; }
+  .task-row > * { min-height: 0; }
+  .task-row.is-leaving { grid-template-rows: 0fr; opacity: 0; }
+  .task-row.is-leaving > * { overflow: hidden; }
+  /* A row just added is lit for a moment so the eye finds it in its group. */
+  .task-new { animation: taskNew 1.2s ease-out both; }
+  /* The tab badge and the Add button pop in; the badge re-pops on a new count. */
+  .task-pop { animation: popIn .18s cubic-bezier(.2,.7,.3,1) both; }
+}
+@keyframes taskTickPop {
+  0% { transform: scale(1); }
+  35% { transform: scale(.8); }
+  70% { transform: scale(1.12); }
+  100% { transform: scale(1); }
+}
+@keyframes taskCheckIn {
+  from { transform: scale(.4); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+@keyframes taskNew {
+  0% { background-color: var(--color-fill2); }
+  100% { background-color: transparent; }
+}

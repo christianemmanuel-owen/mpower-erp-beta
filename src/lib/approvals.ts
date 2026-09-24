@@ -147,6 +147,19 @@ export function useAmendApproval() {
   })
 }
 
+/**
+ * Undo a decision made by mistake. The request goes back to the queue; an
+ * approved write is unwound on the server, which refuses if the record has
+ * been worked on since (the error says who, and to undo it by hand).
+ */
+export function useReverseApproval() {
+  return useMutation({
+    mutationFn: ({ id, note }: { id: string; note?: string; tbl: string }) =>
+      api<{ ok: true; status: ApprovalStatus }>(`/approvals/${id}/reverse`, { method: 'POST', body: { note } }),
+    onSuccess: (_res, vars) => invalidateAfterDecision(vars.tbl),
+  })
+}
+
 /** Withdraw your own pending request. */
 export function useWithdrawApproval() {
   return useMutation({
@@ -187,7 +200,10 @@ export function useAudit(filter: AuditFilter = {}) {
   ).toString()
   return useQuery({
     queryKey: ['audit', qs],
-    queryFn: () => api<{ rows: AuditRow[]; limit: number; offset: number }>(`/audit${qs ? `?${qs}` : ''}`),
+    queryFn: () => api<{ rows: AuditRow[]; limit: number; offset: number; total: number }>(`/audit${qs ? `?${qs}` : ''}`),
+    // Keep the last page on screen while the next one loads, so paging
+    // doesn't flash an empty table.
+    placeholderData: (prev) => prev,
   })
 }
 
@@ -204,6 +220,7 @@ export const ACTION_LABELS: Record<string, string> = {
   amend: 'Changed before approval',
   approve: 'Approved',
   reject: 'Rejected',
+  reverse: 'Undid a decision',
   upload: 'Uploaded a document',
   remove_file: 'Removed a document',
   login: 'Signed in',

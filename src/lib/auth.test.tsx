@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClient } from './queryClient'
-import { AuthProvider, useAuth } from './auth'
+import { AuthProvider, fieldPages, hasFieldShell, homePath, useAuth } from './auth'
 import type { Seat } from '../data/types'
 
 const adminSeat: Seat = {
@@ -122,5 +122,72 @@ describe('auth session (server-backed)', () => {
     await act(async () => { await queryClient.refetchQueries({ queryKey: ['me'] }) })
     await waitFor(() => expect(state()).toBe('out'))
     expect(localStorage.getItem('erp-token')).toBeNull()
+  })
+})
+
+/**
+ * Which seats get the stripped phone shell, and where each lands.
+ *
+ * The shell only routes the screens that exist, so a seat gets it exactly when
+ * one of its modules has a screen built. A scoped seat whose module has none -
+ * accounts, say - stays on the desktop page: putting it in the shell meant the
+ * catch-all redirected to a path the shell does not route, which redirected
+ * again, and the router bounced forever.
+ */
+describe('field seats and where they land', () => {
+  const seat = (over: Partial<Seat>): Seat => ({ ...adminSeat, isAdmin: false, modules: [], ...over })
+
+  it('gives crew the phone shell, landing on their trips', () => {
+    const crew = seat({ scope: 'own', modules: ['logistics'] })
+    expect(hasFieldShell(crew)).toBe(true)
+    expect(homePath(crew)).toBe('/my/trips')
+  })
+
+  it('gives an agent the phone shell, landing on their sales', () => {
+    const agent = seat({ scope: 'own', modules: ['sales'] })
+    expect(hasFieldShell(agent)).toBe(true)
+    expect(homePath(agent)).toBe('/my/sales')
+  })
+
+  /**
+   * A scoped seat whose module has no field screen gets the full app with the
+   * server filtering the rows - not a shell whose only routes are pages it
+   * cannot reach. That combination used to bounce the router between two paths
+   * forever.
+   */
+  it('keeps a scoped seat with no screen of its own out of the shell', () => {
+    // Accounts has no field screen, so this seat is served by the ordinary
+    // desktop page with the server filtering its rows.
+    const scoped = seat({ scope: 'own', modules: ['accounts'] })
+    expect(hasFieldShell(scoped)).toBe(false)
+    expect(homePath(scoped)).toBe('/accounts')
+  })
+
+  /**
+   * A collector is out with other people's money on them, which is field work
+   * by any measure - so they get the phone shell, not the office page.
+   */
+  it('shells a collector onto their own round', () => {
+    const collector = seat({ scope: 'own', modules: ['collection'] })
+    expect(hasFieldShell(collector)).toBe(true)
+    expect(fieldPages(collector).map((p) => p.path)).toEqual(['/my/collections', '/my/tasks'])
+    expect(homePath(collector)).toBe('/my/collections')
+  })
+
+  /** A seat crewed and selling gets both, and lands on the first. */
+  it('gives a seat with two field screens both of them', () => {
+    const both = seat({ scope: 'own', modules: ['logistics', 'sales'] })
+    expect(fieldPages(both).map((p) => p.path)).toEqual(['/my/trips', '/my/sales', '/my/tasks'])
+    expect(homePath(both)).toBe('/my/trips')
+  })
+
+  it('never shells an admin, whatever the scope says', () => {
+    expect(hasFieldShell(seat({ scope: 'own', modules: ['logistics'], isAdmin: true }))).toBe(false)
+  })
+
+  it('leaves office seats alone', () => {
+    const office = seat({ scope: 'all', modules: ['dashboard', 'logistics'] })
+    expect(hasFieldShell(office)).toBe(false)
+    expect(homePath(office)).toBe('/')
   })
 })

@@ -1,3 +1,4 @@
+import { wasCollected } from './collectionStatus'
 import type { OrderTreatment, Sale, SaleStatus } from '../data/types'
 
 /**
@@ -10,11 +11,11 @@ import type { OrderTreatment, Sale, SaleStatus } from '../data/types'
  *
  *   - A **cancelled** order never consumed stock, so there is nothing to put
  *     back. Its installments should stop being collectable.
- *   - A **returned** order did consume stock. Whether any of it comes back
- *     depends on the treatment: fuel restocked to the warehouse returns to
- *     inventory, fuel written off does not. That distinction is what
- *     `restockedVolume()` in metrics.ts reads, and it is why treatment is a
- *     field rather than a note.
+ *   - A **returned** order did consume stock, and comes off net sales in full
+ *     (or by the partial volume) - net sales are sales less returns, whatever
+ *     was done about the money. Whether the litres come back into the tank is
+ *     a separate fact, `backToStock`, which is all that `restockedVolume()` in
+ *     metrics.ts reads. Inventory is not sales.
  *
  * The money side is deliberately conservative. Cancelling or returning an order
  * cancels its **pending** installments - nothing is owed on an order that was
@@ -31,27 +32,37 @@ export const TREATMENT_OPTIONS: ReadonlyArray<{
   /** Whether this treatment makes sense for a cancellation, a return, or both. */
   appliesTo: 'cancelled' | 'returned' | 'both'
 }> = [
-  { value: 'restocked', label: 'Restocked', hint: 'Fuel came back into the warehouse and is available to sell again.', appliesTo: 'returned' },
+  { value: 'no_action', label: 'Nothing collected', hint: 'Nothing was paid yet - what was owed is simply cancelled.', appliesTo: 'both' },
   { value: 'refunded', label: 'Refunded', hint: 'Money already collected is being returned to the customer.', appliesTo: 'both' },
   { value: 'credit_note', label: 'Credit note', hint: 'Held as credit against the customer’s future orders.', appliesTo: 'both' },
-  { value: 'replaced', label: 'Replaced', hint: 'Re-delivered instead of refunded - raise the replacement as its own order.', appliesTo: 'returned' },
-  { value: 'written_off', label: 'Written off', hint: 'Absorbed as a loss. Nothing returns to stock and nothing is recovered.', appliesTo: 'both' },
-  { value: 'no_action', label: 'No action', hint: 'Nothing owed, nothing returned - the order simply did not happen.', appliesTo: 'cancelled' },
+  { value: 'replaced', label: 'Replaced', hint: 'Re-delivered under a new order - raise the replacement as its own sale.', appliesTo: 'returned' },
 ]
+
+/** Labels for every value that can be stored, including the two legacy ones. */
+export const TREATMENT_LABELS: Record<OrderTreatment, string> = {
+  no_action: 'Nothing collected',
+  refunded: 'Refunded',
+  credit_note: 'Credit note',
+  replaced: 'Replaced',
+  restocked: 'Restocked',
+  written_off: 'Written off',
+}
 
 export const treatmentsFor = (kind: 'cancelled' | 'returned') =>
   TREATMENT_OPTIONS.filter((t) => t.appliesTo === kind || t.appliesTo === 'both')
 
-/** The default treatment for each kind - the overwhelmingly common case. */
-export const defaultTreatment = (kind: 'cancelled' | 'returned'): OrderTreatment =>
-  kind === 'cancelled' ? 'no_action' : 'restocked'
+/** The default treatment for each kind - the overwhelmingly common case: the
+ * order is reversed before any money has moved. */
+export const defaultTreatment = (_kind: 'cancelled' | 'returned'): OrderTreatment => 'no_action'
 
 export interface ResolveInput {
   kind: 'cancelled' | 'returned'
   reason: string
   treatment: OrderTreatment
-  /** Only meaningful for a return; blank means the whole order came back. */
+  /** Only meaningful for a return; blank means the whole order was returned. */
   volumeReturned?: number
+  /** Only meaningful for a return: the fuel came back into the depot, sellable. */
+  backToStock?: boolean
   date: string
   recordedBy?: string
 }
@@ -62,7 +73,9 @@ export interface ResolvePlan {
   cancelledInstallments: number
   /** Value of installments already collected, which this does NOT reverse. */
   collectedAmount: number
-  /** Litres that will return to stock, given the treatment. */
+  /** Litres that come off net sales - the whole order, or the partial volume. */
+  returnedVolume: number
+  /** Litres that will return to stock - only when the fuel came back. */
   restockedVolume: number
 }
 
@@ -73,7 +86,10 @@ const round2 = (n: number) => Math.round(n * 100) / 100
  * decides whether to send it.
  */
 export function planResolution(sale: Sale, input: ResolveInput): ResolvePlan {
-  const collected = sale.installments.filter((i) => i.status === 'collected')
+  // Anything the customer has handed over, banked or not: a check sitting in
+  // the safe is money we are holding and would have to give back, exactly like
+  // cash. Only `pending` is money that never arrived.
+  const collected = sale.installments.filter((i) => wasCollected(i.status))
   const collectedAmount = round2(collected.reduce((s, i) => s + i.amount, 0))
 
   // Pending becomes cancelled; collected and already-cancelled rows are left as
@@ -89,13 +105,14 @@ export function planResolution(sale: Sale, input: ResolveInput): ResolvePlan {
       ? Math.min(input.volumeReturned, sale.volumeLiters)
       : undefined
 
-  // Mirrors restockedVolume() in metrics.ts: only a return treated as restocked
-  // puts fuel back. Keeping the rule in one shape in both places is deliberate -
-  // if they disagree, stock on hand and this preview disagree too.
-  const restocked =
-    input.kind === 'returned' && input.treatment === 'restocked'
-      ? volumeReturned ?? sale.volumeLiters
-      : 0
+  // The sales side and the stock side are two different questions. A return
+  // comes off net sales in full whatever happened to the money - see
+  // netSaleVolume in metrics.ts. Only a return whose fuel came back puts
+  // litres back in the tank - see restockedVolume there. Both rules are kept
+  // in the same shape here so this preview and the figures agree.
+  const returned = input.kind === 'returned' ? volumeReturned ?? sale.volumeLiters : 0
+  const backToStock = input.kind === 'returned' ? input.backToStock ?? true : false
+  const restocked = backToStock ? returned : 0
 
   return {
     patch: {
@@ -105,6 +122,7 @@ export function planResolution(sale: Sale, input: ResolveInput): ResolvePlan {
         date: input.date,
         reason: input.reason.trim(),
         treatment: input.treatment,
+        ...(input.kind === 'returned' ? { backToStock } : {}),
         ...(volumeReturned !== undefined ? { volumeReturned } : {}),
         // Recorded so Revert can put the order back where it was rather than
         // guessing. See OrderResolution.previousStatus.
@@ -114,6 +132,7 @@ export function planResolution(sale: Sale, input: ResolveInput): ResolvePlan {
     },
     cancelledInstallments,
     collectedAmount,
+    returnedVolume: returned,
     restockedVolume: restocked,
   }
 }

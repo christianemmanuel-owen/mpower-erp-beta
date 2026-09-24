@@ -148,11 +148,13 @@ describe('commission', () => {
   const sale = (s: Partial<Sale>): Sale =>
     ({ ...base, id: 's1', agentId: 'ag1', customerId: 'c1', date: '2026-06-05', pricePerLiter: 58, volumeLiters: 4_000, warehouseId: 'w1', fulfillment: 'pickup', paymentMode: 'cash', installments: [], status: 'fulfilled', ...s }) as Sale
 
-  /** 4,000 L at ₱58 = ₱232,000, collected on the given date. */
+  /** 4,000 L at ₱58 = ₱232,000, cleared on the given date.
+   *  Commission is released on clearing, not on the collector taking the
+   *  check, so the fixture has to reach that state to pay anything. */
   const collectedOn = (date: string) => ({
     installments: [{
       id: 'i1', amount: 232_000, principal: 232_000, interestPct: 0,
-      dueDate: date, status: 'collected' as const, collectedAt: date,
+      dueDate: date, status: 'cleared' as const, collectedAt: date, clearedAt: date,
     }],
   })
 

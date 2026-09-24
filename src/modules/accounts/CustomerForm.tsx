@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Field, FormSection, GhostButton, Input, PrimaryButton, Select, Textarea, Dialog,
+  Field, FormSection, GhostButton, Input, PrimaryButton, Select, Textarea, Dialog, WIDE_DIALOG,
 } from '../../components/ui'
 import { FormNav, useSectionNav, type FormNavSection } from '../../components/FormNav'
 import { RailAside, RailRow, RailSection } from '../../components/SummaryRail'
@@ -228,7 +228,7 @@ export default function CustomerForm({ open, editing, onClose, onNotice }: {
         ? [editing.brand, 'Account details'].filter(Boolean).join(' · ')
         : 'A customer account, its three contact points and its terms'}
       onClose={onClose}
-      width={1000}
+      width={WIDE_DIALOG}
       nav={<FormNav sections={navSections} active={active} onJump={jump} />}
       rail={
         <>

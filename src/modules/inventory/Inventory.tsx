@@ -1,20 +1,21 @@
-import { TEAL } from '../../lib/chartColors'
 import { CreateAction } from '../../lib/quickCreate'
 import { useToast } from '../../components/Toast'
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { ArrowUpToLine, TriangleAlert } from 'lucide-react'
 import { nanoid } from 'nanoid'
 import { useTables } from '../../lib/data'
 import { useAuth } from '../../lib/auth'
 import StockThresholds from './StockThresholds'
+import MovementDetail from './MovementDetail'
 import { PendingBanner } from '../settings/Approvals'
-import { recordHref, usePendingRecord } from '../../lib/deepLink'
+import { usePendingRecord } from '../../lib/deepLink'
 import { repos } from '../../data/repo'
-import { stockValue, totalStockValue,
-  type StockSeriesPoint,
+import {
   stockSeries,
-  daysOfCover,
+  daysOfCoverTrailing,
+  depotLedger,
+  totalLedger,
+  utilization,
   warehouseFlow,
   stockMovements,
   billedVolume, inRange, isInstallmentOverdue, purchaseInstallmentEntries, receivedVolume, stockByWarehouse, volumeIn, volumeOut, purchaseInDate,
@@ -23,7 +24,7 @@ import { RangePicker, useRange } from '../../lib/range'
 import { useQuickCreate } from '../../lib/quickCreate'
 import { compareValues, useSortableTable } from '../../lib/sort'
 import { todayISO, addDaysISO, fmtCompactPeso, fmtCurrency, fmtDate, fmtLiters, fmtNum, fmtTerm, label } from '../../lib/format'
-import { InfoTip, ExportButton, Card, Chip, DataTable, Dialog, Field, FormSection, Gauge, GhostButton, Input, KpiStrip, MiniDark, PageHeader, PrimaryButton, Select, filterCls, td } from '../../components/ui'
+import { InfoTip, ExportButton, Card, Chip, DataTable, Dialog, Field, FormSection, GhostButton, Input, KpiStrip, MiniDark, PageHeader, PrimaryButton, RowAction, Select, filterCls, td, WIDE_DIALOG, PageSkeleton } from '../../components/ui'
 import { InstallmentEditor, installmentTotal, standardInstallmentPresets, type InstallmentRow } from '../../components/InstallmentEditor'
 import { RailAside, RailClose, RailDelta, RailRow, RailSection, RailTotal } from '../../components/SummaryRail'
 import { FormNav, useSectionNav, type FormNavSection } from '../../components/FormNav'
@@ -35,7 +36,19 @@ import { hasCatalog, productName, productOptions } from '../../lib/products'
 import { InlineNotice } from '../../components/Notice'
 import PurchaseBoard from './PurchaseBoard'
 import ReceiveDialog from './ReceiveDialog'
-import type { BankAccount, Product, Purchase, PurchasePaymentStatus, Supplier, Warehouse } from '../../data/types'
+import DepotDetail from './DepotDetail'
+import SupplierMix from './SupplierMix'
+import { DEFAULT_PRODUCT_ID, OTHER_PRODUCT_ID, type BankAccount, type Hauler, type Product, type Purchase, type PurchasePaymentStatus, type Supplier, type Warehouse } from '../../data/types'
+
+const FULFILLMENT_WORD: Record<Purchase['fulfillment'], string> = {
+  delivered: 'Supplier delivery', pickup: 'Company pickup', hauler: 'Third-party hauler',
+}
+
+/** The client's payment terms: pay on delivery, or the whole amount at 7, 15
+ *  or 30 days. Anything else is built by hand in the rows below. */
+const PURCHASE_TERMS = [
+  { label: 'COD', days: 0 }, { label: '7 days', days: 7 }, { label: '15 days', days: 15 }, { label: '30 days', days: 30 },
+]
 
 const purchaseInstallmentStatusOptions = [
   { value: 'pending', label: 'Pending' },
@@ -53,35 +66,44 @@ const purchaseInstallmentStatusOptions = [
  * the subpages cannot disagree about what is in the tanks.
  */
 /**
- * One depot's balance over the period.
- *
- * The ledger says what is in the tank now; this says whether it is filling or
- * draining, which the number on its own cannot answer.
+ * One cell for how full the tank is: the level now as the bar and the big
+ * figure, the average over the range as a tick on the same bar and a small
+ * line under it. Capacity and Utilization used to be two columns with a bar
+ * each, which read as the same thing twice.
  */
-function DepotTrend({ series, warehouseId }: { series: StockSeriesPoint[]; warehouseId: string }) {
-  const values = series.map((pt) => pt.values[warehouseId] ?? 0)
-  if (values.length < 2) return <span className="font-meta text-[12px] text-faint">—</span>
-  const max = Math.max(...values)
-  const min = Math.min(...values)
-  const span = max - min
-  const pts = values.map((v, i) => {
-    const x = (i / (values.length - 1)) * 116
-    // A depot that held steady has no range to scale against, so it draws down
-    // the middle rather than dividing by zero or pinning flat to the floor.
-    const y = span === 0 ? 13 : 24 - ((v - min) / span) * 20
-    return `${x.toFixed(1)},${y.toFixed(1)}`
-  })
-  const [lx, ly] = (pts[pts.length - 1] ?? '116,13').split(',')
-  return (
-    <svg viewBox="0 0 120 26" preserveAspectRatio="none" className="block h-[24px] w-[92px]" role="img" aria-hidden="true">
-      <polyline
-        fill="none" stroke={TEAL} strokeWidth={1.4}
-        strokeLinejoin="round" strokeLinecap="round"
-        vectorEffect="non-scaling-stroke" points={pts.join(' ')}
-      />
-      <circle cx={lx} cy={ly} r={2} fill={TEAL} />
-    </svg>
+function FillCell({ pct, near, util }: {
+  pct: number | null
+  near: boolean
+  util: { avg: number; peak: number; low: number } | null
+}) {
+  if (pct === null) return <span className="font-meta text-[12px] text-faint">no capacity</span>
+  const avg = util ? Math.round(util.avg * 100) : null
+  // Two labelled rows rather than one bar with an unexplained tick: "today"
+  // and "average" say what each number is without a legend or a tooltip.
+  const Row = ({ label, value, bar }: { label: string; value: number; bar: string }) => (
+    <span className="grid grid-cols-[46px_72px_36px] items-center gap-[6px]">
+      <span className="font-meta text-[11px] text-mut">{label}</span>
+      <span className="relative block h-[5px] overflow-hidden rounded-full bg-fill2" aria-hidden>
+        <span className={`absolute inset-y-0 left-0 rounded-full ${bar}`} style={{ width: `${Math.min(value, 100)}%` }} />
+      </span>
+      <span className={`tnum text-right text-[12.5px] leading-none ${label === 'today' ? `font-semibold ${near ? 'text-ambertext' : 'text-ink'}` : 'text-sec'}`}>{value}%</span>
+    </span>
   )
+  return (
+    <span className="flex flex-col items-end gap-[4px]" aria-label={`${pct}% full today${avg !== null ? `, ${avg}% on average` : ''}`}>
+      <Row label="today" value={pct} bar={near ? 'bg-amber' : 'bg-faint'} />
+      {avg !== null && <Row label="average" value={avg} bar="bg-teal" />}
+    </span>
+  )
+}
+
+/** Days of cover as words a reorder decision can use. Past a year the exact
+ *  number - "23,670 days" - is noise; the point is that it is not a concern. */
+function coverLabel(days: number): string {
+  if (days < 1) return 'under a day'
+  if (days >= 365) return 'over a year'
+  if (days >= 90) return '90+ days'
+  return `${Math.round(days)} days`
 }
 
 const PAGE_TITLES = { levels: 'Stock levels', purchases: 'Purchases', movements: 'Movements', warnings: 'Low supply warnings' } as const
@@ -91,6 +113,8 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
   const quick = useQuickCreate()
   const [search, setSearch] = useState('')
   const [warehouseFilter, setWarehouseFilter] = useState('')
+  /** The movement whose details are open, by its ledger id. */
+  const [openMove, setOpenMove] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState('')
   const [fulfillmentFilter, setFulfillmentFilter] = useState('')
   const [formOpen, setFormOpen] = useState(false)
@@ -98,6 +122,8 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
   /** The purchase whose delivery is being received - Exhibit A 1.2 asks for the
    * volume that actually arrived, which can differ from what was ordered. */
   const [receiving, setReceiving] = useState<Purchase | null>(null)
+  /** The depot opened from its row, for everything that happened to it. */
+  const [openDepot, setOpenDepot] = useState<Warehouse | null>(null)
   /** Shown after a save that was parked for approval (Secondary Feature 2.1),
    * so "saved" is never implied for something that hasn't been posted. */
   const toast = useToast()
@@ -121,9 +147,9 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
     setEditingPurchase(null)
   }
 
-  const data = useTables(['purchases', 'sales', 'warehouses', 'suppliers', 'bankAccounts', 'products', 'customers', 'stockThresholds'] as const)
-  if (!data) return null
-  const { purchases, sales, warehouses, suppliers, bankAccounts, products, customers, stockThresholds } = data
+  const data = useTables(['purchases', 'sales', 'warehouses', 'suppliers', 'haulers', 'bankAccounts', 'products', 'customers', 'stockThresholds'] as const)
+  if (!data) return <PageSkeleton />
+  const { purchases, sales, warehouses, suppliers, haulers, bankAccounts, products, customers, stockThresholds } = data
   const showProduct = hasCatalog(products)
 
   const movements = stockMovements(purchases, sales, range)
@@ -177,9 +203,14 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
   const buyCost = inRangeReceived.reduce((s, p) => s + receivedVolume(p) * p.pricePerLiter, 0)
   const buyVol = inRangeReceived.reduce((s, p) => s + receivedVolume(p), 0)
   const awaiting = purchases.filter((p) => p.status === 'ordered').length
-  // Summed from the same per-depot function the Value column prints, so the
-  // total and the column can never disagree.
-  const stockVal = totalStockValue(purchases, sales, warehouses.map((w) => w.id))
+  // Summed from the same per-depot ledger the Value column prints, so the
+  // total and the column can never disagree. Moving-average cost: what the
+  // litres now in the tanks cost, not a blend that still counts fuel long sold.
+  const book = totalLedger(purchases, sales, warehouses.map((w) => w.id))
+  const ledgers = new Map(warehouses.map((w) => [w.id, depotLedger(purchases, sales, w.id)]))
+  const sourceRows = Object.entries(book.sources)
+    .map(([id, liters]) => ({ id, liters, name: id === '?' ? 'Unknown' : supplierName(id) }))
+    .sort((a, b) => b.liters - a.liters)
 
   const openInstallments = purchaseInstallmentEntries(purchases).filter((e) => e.installment.status === 'pending')
   const toPay = openInstallments.reduce((sum, e) => sum + e.installment.amount, 0)
@@ -256,8 +287,8 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
         p.poReferenceNo ?? '',
         supplierName(p.supplierId),
         warehouseName(p.warehouseId),
-        productName(products, p.productId),
-        p.fulfillment === 'delivered' ? 'Supplier delivery' : 'Company pickup',
+        productName(products, p.productId, p.productLabel),
+        FULFILLMENT_WORD[p.fulfillment] ?? p.fulfillment,
         p.volumeLiters,
         p.status === 'received' ? p.volumeReceived ?? p.volumeLiters : null,
         p.pricePerLiter,
@@ -302,25 +333,39 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
             { label: 'Volume in', value: fmtLiters(vin) },
             { label: 'Volume out', value: fmtLiters(vout) },
             { label: 'Net change', value: `${net >= 0 ? '+' : ''}${fmtNum(net)} L` },
-            { label: 'Avg buy price', value: buyVol > 0 ? `₱${(buyCost / buyVol).toFixed(2)}/L` : '—' },
             {
-              label: (
-                <span className="inline-flex items-center gap-[5px]">
-                  Stock value
-                  <InfoTip label="How the tanks are valued">
-                    What the fuel standing in the tanks cost to buy: each depot's volume
-                    at the weighted-average price of everything ever received there, then
-                    added up. All-time on both sides, so it does not move with the date
-                    range above - and it is weighted-average costing rather than FIFO, so
-                    treat it as what the stock cost, not as a book value.
-                    {stockVal.unpriced > 0 && ` ${stockVal.unpriced} depot${stockVal.unpriced === 1 ? '' : 's'} could not be priced and ${stockVal.unpriced === 1 ? 'is' : 'are'} left out.`}
-                  </InfoTip>
-                </span>
-              ),
-              value: stockVal.priced > 0 ? fmtCompactPeso(stockVal.total) : '—',
-              sub: stockVal.unpriced > 0
-                ? <span className="text-ambertext">{stockVal.priced} of {warehouses.length} depots priced</span>
-                : <span>at average cost</span>,
+              label: 'Avg buy price',
+              tip: {
+                label: 'Avg buy price',
+                body: (
+                  <>
+                    Total paid for deliveries received in the range, divided by the litres
+                    delivered. A price for the period; the tanks themselves are valued at
+                    the moving average under Stock value.
+                  </>
+                ),
+              },
+              value: buyVol > 0 ? `₱${(buyCost / buyVol).toFixed(2)}/L` : '—',
+            },
+            {
+              label: 'Stock value',
+              tip: {
+                label: 'Stock value',
+                body: (
+                  <>
+                    Litres on hand × each depot's moving-average cost. Every delivery
+                    re-averages its price into what was in the tank at that moment; a
+                    sale takes litres out at that average. Weighted by litres only - no
+                    interest on earlier loads, and fuel already sold no longer counts.
+                    Does not move with the date range.
+                    {book.unpriced > 0 && ` ${book.unpriced} depot${book.unpriced === 1 ? '' : 's'} could not be priced and ${book.unpriced === 1 ? 'is' : 'are'} left out.`}
+                  </>
+                ),
+              },
+              value: book.priced > 0 ? fmtCompactPeso(book.value) : '—',
+              sub: book.unpriced > 0
+                ? <span className="text-ambertext">{book.priced} of {warehouses.length} depots priced</span>
+                : <span>{book.onHand > 0 ? `₱${(book.value / book.onHand).toFixed(2)}/L moving avg` : 'moving-average cost'}</span>,
             },
             { label: 'To pay', value: fmtCompactPeso(toPay), sub: <span className="font-semibold text-redtext">{fmtCompactPeso(overduePayable)} overdue</span> },
           ]}
@@ -334,13 +379,12 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
       <Card className="mb-3 flex flex-col">
         <div className="flex flex-wrap items-center gap-[10px] border-b border-linesoft px-[14px] py-[10px]">
           <span className="text-[13px] font-semibold">Depots</span>
-          <InfoTip label="Which columns move with the date range">
-            On hand and Capacity are current, whatever range is selected. In, Out and
-            Net are only what moved inside the range, so a narrow range can show a
-            large stock beside almost no movement.
+          <InfoTip label="Depots">
+            On hand, Fill, Value and Cover are as of today. In, Out, Net and the
+            average fill follow the date range. Click a depot for its full activity.
           </InfoTip>
           <span className="ml-auto font-meta text-[12px] text-mut">
-            {fmtLiters(totalStock)} total
+            <span className="tnum font-semibold text-ink">{fmtLiters(totalStock)}</span> on hand
           </span>
         </div>
         <DataTable
@@ -348,37 +392,38 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
             { label: '' },
             { label: 'Depot' },
             { label: 'On hand', align: 'right' },
-            { label: 'Capacity', align: 'right' },
+            {
+              label: (
+                <>
+                  Utilization <InfoTip label="Utilization"><b>Today</b> is the level right now as a share of the tank.
+                    <b> Average</b> is the average level over the date range - how much
+                    of the tank is really being used. A tank that averages 40% full
+                    has room to buy bigger loads.</InfoTip>
+                </>
+              ),
+              align: 'right',
+            },
             { label: 'In', align: 'right' },
             { label: 'Out', align: 'right' },
             { label: 'Net', align: 'right' },
             {
               label: (
-                <span className="inline-flex items-center gap-[5px]">
-                  Value
-                  <InfoTip label="What this depot's fuel cost">
-                    On-hand volume at the weighted-average price of everything ever
-                    received into this depot. A depot that has never taken a delivery
-                    has no price to value it at and shows a dash rather than zero.
-                  </InfoTip>
-                </span>
+                <>
+                  Value <InfoTip label="Value">Litres on hand × this depot's moving-average cost, with that cost
+                    shown beneath. A depot that has never taken a delivery has no price
+                    to value it at and shows a dash.</InfoTip>
+                </>
               ),
               align: 'right',
             },
-            { label: 'Trend' },
             {
               label: (
-                <span className="inline-flex items-center gap-[5px]">
-                  Cover
-                  <InfoTip label="How days of cover is projected">
-                    Stock on hand divided by the average daily outflow, where the
-                    average is spread over the whole selected range - not over the days
-                    that actually had trade. A range reaching into the future, or back
-                    before this depot traded, therefore flatters the figure. A depot
-                    with no outflow at all shows nothing rather than unlimited cover: a
-                    quiet month is not proof a depot will never run dry.
-                  </InfoTip>
-                </span>
+                <>
+                  Cover <InfoTip label="Cover">Stock on hand ÷ average litres sold per day over the last 30 days.
+                    Fixed window ending today, so it does not move with the date range;
+                    days before the depot first traded are left out. No sales in the
+                    window shows "no sales" rather than unlimited cover.</InfoTip>
+                </>
               ),
               align: 'right',
             },
@@ -391,12 +436,20 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
             const pct = w.capacityLiters > 0 ? Math.round((v / w.capacityLiters) * 100) : null
             const near = pct !== null && pct >= 85
             const flow = warehouseFlow(purchases, sales, w.id, range)
-            const cover = daysOfCover(purchases, sales, w.id, range)
-            const value = stockValue(purchases, sales, w.id)
+            const cover = daysOfCoverTrailing(purchases, sales, w.id).days
+            const ledger = depotLedger(purchases, sales, w.id)
+            const util = utilization(stockSer, w.id, w.capacityLiters)
             const level = thresholdFor(w.id)
             const below = level !== null && v < level
             return (
-              <tr key={w.id} className="hover:bg-fill2">
+              <tr
+                key={w.id}
+                className="cursor-pointer hover:bg-fill2"
+                onClick={() => setOpenDepot(w)}
+                onKeyDown={(e) => { if (e.key === 'Enter') setOpenDepot(w) }}
+                tabIndex={0}
+                aria-label={`Open ${w.name}`}
+              >
                 {/* State as a mark rather than a sentence. The prose repeated
                     figures already in the row, and a depot in both states could
                     only ever show one of the two messages. */}
@@ -419,31 +472,26 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
                 <td className={`${td} text-right`}>
                   <p className="tnum m-0 text-[13px] font-semibold">{fmtLiters(v)}</p>
                 </td>
-                <td className={`${td} text-right`}>
-                  <span className="flex flex-col items-end gap-[5px]">
-                    <span className={`tnum font-meta text-[12px] ${near ? 'font-semibold text-ambertext' : 'text-mut'}`}>
-                      {pct === null ? 'not set' : `${pct}%`}
-                    </span>
-                    {pct !== null && (
-                      <span className="w-[72px]"><Gauge pct={pct} color={near ? 'bg-amber' : 'bg-faint'} /></span>
-                    )}
-                  </span>
-                </td>
-                <td className={`${td} tnum text-right text-[13px]`}>{flow.in > 0 ? fmtLiters(flow.in) : '—'}</td>
-                <td className={`${td} tnum text-right text-[13px]`}>{flow.out > 0 ? fmtLiters(flow.out) : '—'}</td>
+                <td className={`${td} text-right`}><FillCell pct={pct} near={near} util={util} /></td>
+                <td className={`${td} tnum text-right text-[13px]`}>{flow.in > 0 ? fmtLiters(flow.in) : <span className="text-faint">—</span>}</td>
+                <td className={`${td} tnum text-right text-[13px]`}>{flow.out > 0 ? fmtLiters(flow.out) : <span className="text-faint">—</span>}</td>
                 <td className={`${td} tnum text-right text-[13px] font-semibold`}>
-                  {flow.net === 0 ? '—' : `${flow.net > 0 ? '+' : ''}${fmtNum(flow.net)} L`}
+                  {flow.net === 0 ? <span className="font-normal text-faint">—</span> : `${flow.net > 0 ? '+' : ''}${fmtNum(flow.net)} L`}
                 </td>
                 <td className={`${td} tnum whitespace-nowrap text-right`}>
-                  {value === null ? <span className="text-faint">—</span> : fmtCompactPeso(value)}
+                  {ledger.value === null ? <span className="text-faint">—</span> : (
+                    <span className="flex flex-col items-end">
+                      <span className="text-[13px]">{fmtCompactPeso(ledger.value)}</span>
+                      <span className="font-meta text-[11px] text-mut">₱{ledger.avgCost!.toFixed(2)}/L</span>
+                    </span>
+                  )}
                 </td>
-                <td className={td}><DepotTrend series={stockSer} warehouseId={w.id} /></td>
                 <td className={`${td} tnum whitespace-nowrap pr-[14px] text-right text-[13px]`}>
                   {cover === null ? (
                     <span className="font-meta text-[12px] text-faint">no sales</span>
                   ) : (
                     <span className={cover < 14 ? 'font-semibold text-redtext' : cover < 30 ? 'font-semibold text-ambertext' : 'text-lab'}>
-                      {cover < 1 ? 'under a day' : `${Math.round(cover)} days`}
+                      {coverLabel(cover)}
                     </span>
                   )}
                 </td>
@@ -453,6 +501,17 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
         </DataTable>
       </Card>
 
+      {sourceRows.length > 0 && (
+        <SupplierMix
+          total={{ id: 'all', name: 'All depots', onHand: book.onHand, sources: book.sources }}
+          depots={warehouses.map((w) => {
+            const l = ledgers.get(w.id)!
+            return { id: w.id, name: w.name.replace(' depot', ''), onHand: Math.max(l.onHand, 0), sources: l.sources }
+          })}
+          sources={sourceRows}
+          suppliers={suppliers}
+        />
+      )}
 
         </>
       )}
@@ -483,8 +542,31 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
           No card header: on its own subpage the PageHeader already says
           "Movements" and how many there are, and repeating it is just a second
           thing to read. */}
+      {openDepot && (
+        <DepotDetail
+          depot={openDepot}
+          purchases={purchases}
+          sales={sales}
+          suppliers={suppliers}
+          customers={customers}
+          range={range}
+          onClose={() => setOpenDepot(null)}
+        />
+      )}
+
       {page === 'movements' && (
       <Card className="mb-3 flex flex-col">
+        {/* The depot filter was only on the Purchases page, though the ledger
+            already honoured it - and a single depot is what makes the running
+            balance column readable. */}
+        <div className="flex flex-wrap items-center gap-[10px] border-b border-linesoft px-[14px] py-[10px]">
+          <span className="text-[13px] font-semibold">Movements</span>
+          <span className="font-meta text-[12px] text-mut">{shownMovements.length} in range</span>
+          <select value={warehouseFilter} onChange={(e) => setWarehouseFilter(e.target.value)} aria-label="Depot" className={`ml-auto ${filterCls}`}>
+            <option value="">All depots</option>
+            {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name.replace(' depot', '')}</option>)}
+          </select>
+        </div>
         <DataTable
           cols={[
             { label: 'Date' },
@@ -498,20 +580,26 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
           resetKey={`${range.from}-${range.to}-${warehouseFilter}`}
         >
           {shownMovements.map((m) => {
-              const href = recordHref(m.tbl, m.recordId)
               const who = m.tbl === 'purchases'
                 ? suppliers.find((x) => x.id === m.counterpartyId)?.name
                 : customers.find((x) => x.id === m.counterpartyId)?.company
               const verb = m.kind === 'receipt' ? 'Received from' : m.kind === 'return' ? 'Returned by' : 'Sold to'
+              // The row opens the movement's details, as everywhere else; the
+              // sale or purchase behind it is one more click, in the dialog.
               return (
-                <tr key={m.id} className="hover:bg-fill2">
+                <tr
+                  key={m.id}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${verb} ${who ?? ''}, ${m.liters > 0 ? '+' : ''}${fmtNum(m.liters)} L`}
+                  onClick={() => setOpenMove(m.id)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') setOpenMove(m.id) }}
+                  className="cursor-pointer transition-colors hover:bg-paper focus:outline-none focus-visible:bg-paper"
+                >
                   <td className={`${td} pl-[14px] font-meta text-[12px] text-mut`}>{fmtDate(m.date)}</td>
                   <td className={td}>
                     <p className="m-0 text-[13px]">
-                      {verb}{' '}
-                      {href
-                        ? <Link to={href} className="font-semibold text-lab hover:underline">{who ?? '—'}</Link>
-                        : <span className="font-semibold">{who ?? '—'}</span>}
+                      {verb} <span className="font-semibold text-lab">{who ?? '—'}</span>
                     </p>
                   </td>
                   <td className={`${td} font-meta text-[12px] text-mut`}>
@@ -531,6 +619,17 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
               )
             })}
         </DataTable>
+        {openMove && (() => {
+          const m = shownMovements.find((x) => x.id === openMove)
+          return m ? (
+            <MovementDetail
+              move={m}
+              balanceAfter={balanceAfter.get(m.id)}
+              sales={sales} purchases={purchases} suppliers={suppliers} customers={customers} warehouses={warehouses} products={products}
+              onClose={() => setOpenMove(null)}
+            />
+          ) : null
+        })()}
       </Card>
       )}
 
@@ -591,13 +690,22 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
             ]}
           >
             {rows.map((p) => (
-              <tr key={p.id} className="hover:bg-hovrow">
+              // The whole row opens the purchase - the client's "redirect when
+              // pressed". Buttons inside stop the click so Mark received and
+              // Revert still do their own thing.
+              <tr
+                key={p.id}
+                className="cursor-pointer hover:bg-hovrow"
+                onClick={() => openEdit(p)}
+                onKeyDown={(e) => { if (e.key === 'Enter') openEdit(p) }}
+                tabIndex={0}
+              >
                 <td className={`${td} whitespace-nowrap pl-5 text-mut`}>{fmtDate(p.date)}</td>
                 <td className={td}>
                   <p className="m-0 font-semibold">{supplierName(p.supplierId)}</p>
                   <p className="m-0 text-[12px] text-faint">
-                    {p.fulfillment === 'delivered' ? 'Supplier delivery' : 'Company pickup'} · {warehouseName(p.warehouseId)}
-                    {showProduct ? ` · ${productName(products, p.productId)}` : ''}
+                    {FULFILLMENT_WORD[p.fulfillment] ?? p.fulfillment}{p.fulfillment === 'hauler' && p.hauler?.name ? ` (${p.hauler.name})` : ''} · {warehouseName(p.warehouseId)}
+                    {showProduct ? ` · ${productName(products, p.productId, p.productLabel)}` : ''}
                   </p>
                   {p.poReferenceNo && <p className="m-0 text-[12px] text-faint">PO {p.poReferenceNo}</p>}
                 </td>
@@ -634,13 +742,15 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
                   })()}
                 </td>
                 <td className={td}><Chip status={p.status} text={label(p.status)} /></td>
-                <td className={`${td} pr-5 text-right`}>
-                  <span className="inline-flex items-center gap-3">
+                <td className={`${td} pr-5 text-right`} onClick={(e) => e.stopPropagation()}>
+                  <span className="inline-flex items-center gap-[4px]">
                     {p.status === 'ordered' && (
                       <MiniDark onClick={() => setReceiving(p)}>Mark received</MiniDark>
                     )}
                     {p.status === 'received' && (
-                      <button
+                      <RowAction
+                        verb="revert"
+                        label="Undo the receipt - back to ordered"
                         onClick={() => repos.purchases.update(p.id, {
                           status: 'ordered',
                           // Clear the whole receipt, not just the status. Leaving
@@ -650,12 +760,9 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
                           volumeReceived: undefined,
                           receivedAt: undefined,
                         })}
-                        className="cursor-pointer px-[2px] py-1 text-[11px] font-semibold uppercase text-faint hover:text-redtext hover:underline"
-                      >
-                        Revert
-                      </button>
+                      />
                     )}
-                    <button onClick={() => openEdit(p)} className="cursor-pointer px-[2px] py-1 text-[11px] font-semibold uppercase text-tealtext hover:underline">Edit</button>
+                    <RowAction verb="edit" label="Edit purchase" onClick={() => openEdit(p)} />
                   </span>
                 </td>
               </tr>
@@ -669,8 +776,8 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
 
       <PurchaseForm
         open={formOpen} onClose={closeForm} editing={editingPurchase}
-        suppliers={suppliers} warehouses={warehouses} bankAccounts={bankAccounts} headroom={headroom}
-        products={products} showProduct={showProduct}
+        suppliers={suppliers} haulers={haulers} warehouses={warehouses} bankAccounts={bankAccounts} headroom={headroom} onHand={stock}
+        products={products}
         onNotice={toast}
       />
 
@@ -683,16 +790,23 @@ export default function Inventory({ page = 'levels' }: { page?: 'levels' | 'purc
   )
 }
 
-function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccounts, headroom, products, showProduct, onNotice }: {
+export function PurchaseForm({ open, onClose, editing, suppliers, haulers, warehouses, bankAccounts, headroom, onHand, products, onNotice, readOnly = false }: {
+  /** Shown to a seat that may look but not change it - a treasurer opening
+   *  a purchase from Payables. Every control is disabled and the footer
+   *  only closes; the server refuses the edit anyway (foreignFieldProblem). */
+  readOnly?: boolean
   open: boolean
   onClose: () => void
   editing: Purchase | null
   suppliers: Supplier[]
+  /** Third-party haulers on file - Admin & settings → Haulers. */
+  haulers: Hauler[]
   warehouses: Warehouse[]
   bankAccounts: BankAccount[]
   headroom: (w: Warehouse) => number
+  /** Litres on hand per depot today, for the "after this order" figures. */
+  onHand: Map<string, number>
   products: Product[]
-  showProduct: boolean
   onNotice: (message: string) => void
 }) {
   const [form, setForm] = useState(newPurchaseForm)
@@ -701,22 +815,49 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
   const [showProblems, setShowProblems] = useState(false)
   // Every time the drawer opens, load the record being edited - or start from a genuinely
   // blank form for a new purchase (state used to persist across Cancel/reopen otherwise).
+  /** "Save this hauler for next time" - ticked per purchase, never remembered. */
+  const [saveHauler, setSaveHauler] = useState(false)
   useEffect(() => {
     if (!open) return
     setForm(editing ? purchaseToForm(editing) : newPurchaseForm())
+    setSaveHauler(false)
     setError(null)
   }, [open, editing])
   const set = (k: string, v: unknown) => setForm((f) => ({ ...f, [k]: v }))
-  // The form takes the total price the supplier is charging; price per liter - the value
-  // actually stored on the purchase, and what every other screen (Stock, Accounts, the price
-  // chart) reads - is derived from it.
+  // Price per litre and total are two views of one figure: suppliers quote
+  // per litre, so typing either keeps the other in step through the volume.
+  // The stored value is per litre; the total is what the rail and the plan use.
   const pricePerLiter = form.volumeLiters > 0 ? form.totalPrice / form.volumeLiters : 0
+  const round2 = (n: number) => Math.round(n * 100) / 100
+  const setVolume = (v: number) => setForm((f) => ({ ...f, volumeLiters: v, totalPrice: f.unitPrice > 0 ? round2(v * f.unitPrice) : f.totalPrice }))
+  const setUnitPrice = (u: number) => setForm((f) => ({ ...f, unitPrice: u, totalPrice: round2(f.volumeLiters * u) }))
+  const setTotal = (t: number) => setForm((f) => ({ ...f, totalPrice: t, unitPrice: f.volumeLiters > 0 ? round2(t / f.volumeLiters) : f.unitPrice }))
+  const setHauler = (k: keyof NonNullable<Purchase['hauler']>, v: unknown) =>
+    setForm((f) => ({ ...f, hauler: { ...f.hauler, [k]: v } }))
+  /** Fill the hauler block from one on file. Blank id = type it by hand. */
+  const pickHauler = (id: string) => {
+    const h = haulers.find((x) => x.id === id)
+    if (!h) { setHauler('haulerId', undefined); return }
+    setForm((f) => ({
+      ...f,
+      hauler: {
+        ...f.hauler,
+        haulerId: h.id,
+        name: h.name,
+        contact: [h.contactPerson, h.contactNumber].filter(Boolean).join(' · '),
+        fee: h.defaultFee ?? f.hauler.fee,
+        paymentMode: h.paymentMode ?? f.hauler.paymentMode,
+      },
+    }))
+  }
 
   // A purchase adds stock rather than consuming it, so the depot question is
   // whether it fits, not whether there is enough.
   const depot = warehouses.find((w) => w.id === form.warehouseId)
   const room = depot ? headroom(depot) : 0
   const overflows = !!depot && form.volumeLiters > room
+  const depotNow = depot ? Math.max(onHand.get(depot.id) ?? 0, 0) : 0
+  const masterNow = warehouses.reduce((sum, w) => sum + Math.max(onHand.get(w.id) ?? 0, 0), 0)
 
   const planned = form.installments.reduce((sum, i) => sum + i.principal, 0)
   const unplanned = Math.round((form.totalPrice - planned) * 100) / 100
@@ -729,6 +870,8 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
   if (form.paymentMode === 'bank_transfer' && !form.bankAccountId) {
     problems.bankAccountId = 'Select the paying bank account.'
   }
+  if (form.productId === OTHER_PRODUCT_ID && !form.productLabel.trim()) problems.productLabel = 'Name the product.'
+  if (form.fulfillment === 'hauler' && !form.hauler.name.trim()) problems.haulerName = 'Name the hauler.'
   if (form.installments.length === 0) problems.installments = 'Add at least one payment entry.'
   else if (form.installments.some((i) => i.principal <= 0 || !i.dueDate)) {
     problems.installments = 'Each payment entry requires an amount and a due date.'
@@ -739,11 +882,11 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
   // The form's parts, for the nav. Each names the fields it owns so its mark is
   // derived rather than tracked separately.
   const SECTIONS: { id: string; title: string; keys: string[]; filled: () => boolean }[] = [
-    { id: 'sec-what', title: 'Supplier & order', keys: ['supplierId', 'volumeLiters', 'totalPrice'], filled: () => !!form.supplierId && form.volumeLiters > 0 && form.totalPrice > 0 },
-    { id: 'sec-po', title: 'PO reference', keys: [], filled: () => !!form.poReferenceNo },
-    { id: 'sec-where', title: 'Delivery & storage', keys: ['warehouseId'], filled: () => !!form.warehouseId },
+    { id: 'sec-what', title: 'Supplier & order', keys: ['supplierId', 'volumeLiters', 'totalPrice', 'productLabel'], filled: () => !!form.supplierId && form.volumeLiters > 0 && form.totalPrice > 0 },
+    { id: 'sec-po', title: 'PO & documents', keys: [], filled: () => !!form.poReferenceNo },
+    { id: 'sec-where', title: 'Delivery & storage', keys: ['warehouseId', 'haulerName'], filled: () => !!form.warehouseId && (form.fulfillment !== 'hauler' || !!form.hauler.name) },
     { id: 'sec-payment', title: 'Payment', keys: ['bankAccountId'], filled: () => form.paymentMode !== 'bank_transfer' || !!form.bankAccountId },
-    { id: 'sec-plan', title: 'Payment plan', keys: ['installments'], filled: () => form.installments.length > 0 && Math.abs(form.totalPrice - planned) < 0.01 },
+    { id: 'sec-plan', title: 'Payment terms', keys: ['installments'], filled: () => form.installments.length > 0 && Math.abs(form.totalPrice - planned) < 0.01 },
   ]
   const navSections: FormNavSection[] = SECTIONS.map((sec) => ({
     id: sec.id,
@@ -797,13 +940,34 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
       setError(`${Object.keys(problems).length === 1 ? 'One field needs' : `${Object.keys(problems).length} fields need`} attention.`)
       return
     }
-    const { totalPrice: _totalPrice, installments, productId, ...rest } = form
+    const { totalPrice: _totalPrice, unitPrice: _unitPrice, installments, productId, productLabel, hauler, ...rest } = form
+    // "Save this hauler for next time": one record on file, so the next
+    // purchase picks it instead of retyping it. Done before the purchase so
+    // the purchase can point at it.
+    let haulerId = hauler.haulerId
+    if (form.fulfillment === 'hauler' && saveHauler && !haulerId && hauler.name.trim()) {
+      try {
+        const saved = await repos.haulers.add({
+          name: hauler.name.trim(),
+          contactNumber: hauler.contact?.trim() || undefined,
+          defaultFee: hauler.fee || undefined,
+          paymentMode: hauler.paymentMode,
+        })
+        if (!isPending(saved) && saved && typeof saved === 'object' && 'id' in saved) haulerId = String((saved as { id: string }).id)
+      } catch {
+        // The purchase still saves; the hauler can be added under Settings.
+      }
+    }
     const payload = {
       ...rest,
       // Blank means the default product - see src/lib/products.ts. Storing the
       // default id explicitly would work too, but keeping it blank means diesel
       // records look identical to the ones written before the catalog existed.
       productId: productId || undefined,
+      productLabel: productId === OTHER_PRODUCT_ID ? productLabel.trim() : undefined,
+      hauler: form.fulfillment === 'hauler'
+        ? { ...hauler, haulerId, name: hauler.name.trim(), date: hauler.date ? new Date(hauler.date).toISOString() : undefined }
+        : undefined,
       pricePerLiter: Math.round(pricePerLiter * 100) / 100,
       date: new Date(form.date).toISOString(),
       bankAccountId: form.paymentMode === 'bank_transfer' ? form.bankAccountId : undefined,
@@ -815,6 +979,8 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
         amount: installmentTotal(i.principal, i.interestPct),
         dueDate: new Date(i.dueDate).toISOString(),
         status: i.status,
+        referenceNo: i.referenceNo,
+        notes: i.notes,
       })) as Purchase['installments'],
     }
     setError(null)
@@ -840,10 +1006,10 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
   return (
     <Dialog
       open={open}
-      title={editing ? 'Edit purchase' : 'New purchase'}
+      title={readOnly ? 'Purchase' : editing ? 'Edit purchase' : 'New purchase'}
       subtitle={suppliers.find((x) => x.id === form.supplierId)?.name}
       onClose={onClose}
-      width={1100}
+      width={WIDE_DIALOG}
       nav={<FormNav sections={navSections} active={active} onJump={jump} />}
       rail={
         <>
@@ -855,46 +1021,61 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
 
           {depot && (
             <RailSection title={depot.name}>
-              {/* Room, not stock: this fuel is arriving, and the question a
-                  buyer has is whether the tank can take it. */}
-              <RailRow label="Room now" value={`${fmtNum(Math.max(room, 0))} L`} />
-              <RailDelta label="This order" value={`${fmtNum(form.volumeLiters)} L`} sign="-" />
+              <RailRow label="On hand" value={`${fmtNum(depotNow)} L`} />
+              <RailDelta label="This order" value={`${fmtNum(form.volumeLiters)} L`} sign="+" />
               <RailClose
-                label="Room after"
+                label="Depot after"
                 tone={overflows ? 'bad' : 'plain'}
-                value={overflows
-                  ? `${fmtNum(form.volumeLiters - room)} L over`
-                  : `${fmtNum(Math.max(room - form.volumeLiters, 0))} L`}
+                value={`${fmtNum(depotNow + form.volumeLiters)} L`}
               />
+              <RailRow label="Space left" value={overflows ? `${fmtNum(form.volumeLiters - room)} L over` : `${fmtNum(Math.max(room - form.volumeLiters, 0))} L`} />
               {overflows && <RailAside tone="bad">Exceeds the capacity of {depot.name}.</RailAside>}
             </RailSection>
           )}
+          {depot && warehouses.length > 1 && (
+            <RailSection title="All depots">
+              <RailRow label="On hand" value={`${fmtNum(masterNow)} L`} />
+              <RailClose label="After this order" value={`${fmtNum(masterNow + form.volumeLiters)} L`} />
+            </RailSection>
+          )}
 
+          {/* The check that the payment rows add up to the price. "Planned /
+              left to plan" read as jargon; this says it as a sum. */}
           {form.totalPrice > 0 && (
-            <RailSection title="Payment plan">
+            <RailSection title="Payment schedule">
               <RailRow label="Total price" value={fmtCurrency(form.totalPrice).replace('.00', '')} />
-              <RailDelta label="Planned" value={fmtCurrency(planned).replace('.00', '')} sign="-" />
+              <RailDelta label="Scheduled in rows" value={fmtCurrency(planned).replace('.00', '')} sign="-" />
               <RailClose
-                label={unplanned < 0 ? 'Over the total' : 'Left to plan'}
+                label={unplanned < 0 ? 'Over the total by' : 'Not yet scheduled'}
                 tone={Math.abs(unplanned) < 0.01 ? 'plain' : 'bad'}
                 value={fmtCurrency(Math.abs(unplanned)).replace('.00', '')}
               />
-              {Math.abs(unplanned) >= 0.01 && (
+              {Math.abs(unplanned) >= 0.01 ? (
                 <RailAside tone="bad">
-                  {unplanned > 0 ? 'Add an entry or increase an amount.' : 'Reduce an amount.'}
+                  {unplanned > 0 ? 'The rows below must add up to the total price - add a row or raise an amount.' : 'The rows below exceed the total price - lower an amount.'}
                 </RailAside>
+              ) : (
+                <RailAside>Every peso of the price has a due date.</RailAside>
               )}
             </RailSection>
           )}
         </>
       }
-      footer={
+      footer={readOnly ? (
+        <PrimaryButton onClick={onClose}>Close</PrimaryButton>
+      ) : (
         <>
           <GhostButton onClick={onClose}>Cancel</GhostButton>
           <PrimaryButton onClick={save}>{editing ? 'Save changes' : 'Save purchase'}</PrimaryButton>
         </>
-      }
+      )}
     >
+      <fieldset disabled={readOnly} className="contents [&:disabled_*]:cursor-default">
+      {readOnly && (
+        <p className="mb-3 rounded-[6px] border border-line bg-paper px-3 py-2 font-meta text-[12px] text-mut">
+          Viewing only. Changing the purchase is Stock’s work; your seat pays it from Treasury.
+        </p>
+      )}
       {error && (
         <p className="mb-3 rounded-[6px] border border-redf bg-redbadge px-3 py-2 text-[13px] font-semibold text-redtext">{error}</p>
       )}
@@ -906,27 +1087,55 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
             {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </Select>
         </Field>
+        {/* Who to call and where to load, from the supplier record - so the
+            buyer sees them here without opening Accounts. */}
+        {selectedSupplier && (selectedSupplier.agentName || selectedSupplier.contactPerson || selectedSupplier.depotName || selectedSupplier.depotAddress) && (
+          <div className="col-span-2 grid grid-cols-2 gap-x-4 gap-y-[6px] rounded-[8px] border border-linesoft bg-paper px-[12px] py-[10px] font-meta text-[12px]">
+            <span>
+              <span className="block text-[10px] font-semibold uppercase tracking-[.08em] text-mut">Agent</span>
+              <span className="text-ink">{selectedSupplier.agentName || selectedSupplier.contactPerson || '—'}</span>
+              {(selectedSupplier.agentContact || selectedSupplier.contactNumber) && (
+                <span className="text-mut"> · {selectedSupplier.agentContact || selectedSupplier.contactNumber}</span>
+              )}
+            </span>
+            <span>
+              <span className="block text-[10px] font-semibold uppercase tracking-[.08em] text-mut">Loads from</span>
+              <span className="text-ink">{selectedSupplier.depotName || '—'}</span>
+              {selectedSupplier.depotAddress && <span className="text-mut"> · {selectedSupplier.depotAddress}</span>}
+            </span>
+          </div>
+        )}
+        <Field label="Product" error={problem('productLabel')}>
+          <Select value={form.productId || DEFAULT_PRODUCT_ID} onChange={(e) => set('productId', e.target.value === DEFAULT_PRODUCT_ID ? '' : e.target.value)}>
+            {productOptions(products).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </Select>
+        </Field>
+        {form.productId === OTHER_PRODUCT_ID ? (
+          <Field label="Product name">
+            <Input value={form.productLabel} placeholder="e.g. Kerosene" onChange={(e) => set('productLabel', e.target.value)} />
+          </Field>
+        ) : (
+          <Field label="Date">
+            <Input type="date" value={form.date} onChange={(e) => set('date', e.target.value)} />
+          </Field>
+        )}
         <Field label="Volume (L)" error={problem('volumeLiters')}>
-          <Input type="number" min={1} placeholder="e.g. 10000" value={form.volumeLiters || ''} onChange={(e) => set('volumeLiters', Number(e.target.value))} />
+          <Input type="number" min={1} placeholder="e.g. 10000" value={form.volumeLiters || ''} onChange={(e) => setVolume(Number(e.target.value))} />
         </Field>
-        <Field label="Total price (₱)" error={problem('totalPrice')}>
-          <Input type="number" step="0.01" min={0} placeholder="e.g. 520000" value={form.totalPrice || ''} onChange={(e) => set('totalPrice', Number(e.target.value))} />
+        <Field label="Price per litre (₱)">
+          <Input type="number" step="0.01" min={0} placeholder="e.g. 52.00" value={form.unitPrice || ''} onChange={(e) => setUnitPrice(Number(e.target.value))} />
         </Field>
-        <Field label="Date" span2={!showProduct}>
-          <Input type="date" value={form.date} onChange={(e) => set('date', e.target.value)} />
+        <Field label="Total price (₱)" error={problem('totalPrice')} hint="Volume × price per litre. Typing a total here sets the price per litre instead.">
+          <Input type="number" step="0.01" min={0} placeholder="e.g. 520000" value={form.totalPrice || ''} onChange={(e) => setTotal(Number(e.target.value))} />
         </Field>
-        {/* Only shown once there is more than one product to pick - MPower trades
-            diesel only today, so the form stays as short as it was. */}
-        {showProduct && (
-          <Field label="Product">
-            <Select value={form.productId} onChange={(e) => set('productId', e.target.value)}>
-              {productOptions(products).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </Select>
+        {form.productId === OTHER_PRODUCT_ID && (
+          <Field label="Date">
+            <Input type="date" value={form.date} onChange={(e) => set('date', e.target.value)} />
           </Field>
         )}
       </div>
 
-      <FormSection id="sec-po">Purchase order reference</FormSection>
+      <FormSection id="sec-po">PO &amp; documents</FormSection>
       <div className="grid grid-cols-2 gap-x-4 gap-y-[14px]">
         <Field label="PO reference number" hint="The number on the purchase order issued to the supplier.">
           <div className="flex gap-2">
@@ -954,12 +1163,12 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
           <DocumentUpload
             tbl="purchases"
             recordId={editing.id}
-            slots={['supplierPo', 'supplierDeliveryReceipt', 'fuelAnalysisSlip']}
+            slots={['supplierPo', 'supplierInvoice', 'permitToLoad', 'supplierDeliveryReceipt', 'fuelAnalysisSlip']}
           />
         </div>
       ) : (
         <p className="mt-2 text-[12px] text-faint">
-          Save the purchase first, then reopen it to attach the signed PO and delivery documents.
+          Save the purchase first, then reopen it to attach the PO, invoice, permit to load and delivery documents.
         </p>
       )}
       <FormSection id="sec-where">Delivery &amp; storage</FormSection>
@@ -968,20 +1177,17 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
           <Select value={form.fulfillment} onChange={(e) => set('fulfillment', e.target.value)}>
             <option value="delivered">Supplier delivery</option>
             <option value="pickup">Company pickup</option>
+            <option value="hauler">Third-party hauler</option>
           </Select>
         </Field>
-        <Field label="Store in depot" error={problem('warehouseId')}>
+        <Field label="Store in depot" error={problem('warehouseId')} hint="The figure is the space left in the tank today.">
           <Select value={form.warehouseId} onChange={(e) => set('warehouseId', e.target.value)}>
             <option value="" disabled>Select a depot…</option>
             {warehouses.map((w) => (
-              <option key={w.id} value={w.id}>{w.name} - {fmtNum(headroom(w))} L free</option>
+              <option key={w.id} value={w.id}>{w.name} · space for {fmtNum(Math.max(headroom(w), 0))} L</option>
             ))}
           </Select>
         </Field>
-        {/* Exhibit A 1.2 asks for a delivery address alongside the fulfillment
-            method. The field existed on the record and was written as '' by
-            every save because nothing ever rendered it. Only meaningful when
-            the supplier is bringing the fuel to us. */}
         {form.fulfillment === 'delivered' && (
           <Field
             label="Delivery address"
@@ -994,6 +1200,53 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
               onChange={(e) => set('address', e.target.value)}
             />
           </Field>
+        )}
+        {/* The hauler: who, when, how much, how it is paid, and whether it has
+            been. Picked from the haulers on file when there is one, so the
+            same name, number and fee are not retyped on every load; typed by
+            hand otherwise, with the offer to keep it for next time. */}
+        {form.fulfillment === 'hauler' && (
+          <>
+            {haulers.length > 0 && (
+              <Field label="Saved hauler" span2 hint="Fills in the details below. They can still be changed for this load.">
+                <Select value={form.hauler.haulerId ?? ''} onChange={(e) => pickHauler(e.target.value)} aria-label="Saved hauler">
+                  <option value="">Type the details by hand</option>
+                  {haulers.map((h) => <option key={h.id} value={h.id}>{h.name}{h.defaultFee ? ` · ₱${h.defaultFee.toLocaleString()}` : ''}</option>)}
+                </Select>
+              </Field>
+            )}
+            <Field label="Hauler" error={problem('haulerName')}>
+              <Input value={form.hauler.name} placeholder="e.g. Kargamento Trucking" onChange={(e) => { setHauler('name', e.target.value); setHauler('haulerId', undefined) }} />
+            </Field>
+            <Field label="Hauler contact">
+              <Input value={form.hauler.contact ?? ''} placeholder="Name or number" onChange={(e) => setHauler('contact', e.target.value)} />
+            </Field>
+            <Field label="Pickup date">
+              <Input type="date" value={form.hauler.date ?? ''} onChange={(e) => setHauler('date', e.target.value)} />
+            </Field>
+            <Field label="Hauling fee (₱)">
+              <Input type="number" step="0.01" min={0} placeholder="e.g. 18000" value={form.hauler.fee || ''} onChange={(e) => setHauler('fee', Number(e.target.value))} />
+            </Field>
+            <Field label="Hauler paid by">
+              <Select value={form.hauler.paymentMode} onChange={(e) => setHauler('paymentMode', e.target.value)}>
+                <option value="bank_transfer">Bank transfer</option>
+                <option value="cash">Cash</option>
+                <option value="check">Check</option>
+              </Select>
+            </Field>
+            <Field label="Hauler payment">
+              <Select value={form.hauler.status} onChange={(e) => setHauler('status', e.target.value)}>
+                <option value="unpaid">Unpaid</option>
+                <option value="paid">Paid</option>
+              </Select>
+            </Field>
+            {!form.hauler.haulerId && form.hauler.name.trim() && (
+              <label className="col-span-2 flex cursor-pointer items-center gap-2 text-[13px]">
+                <input type="checkbox" checked={saveHauler} onChange={(e) => setSaveHauler(e.target.checked)} className="cursor-pointer" />
+                Save {form.hauler.name.trim()} to the haulers list for next time
+              </label>
+            )}
+          </>
         )}
       </div>
       <FormSection id="sec-payment">Payment</FormSection>
@@ -1020,13 +1273,39 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
         )}
       </div>
       <FormSection id="sec-plan">
-        Payment plan
+        Payment terms
         {!editing && selectedSupplier && form.installments.length === 1 && (
           <span className="ml-2 text-[10.5px] font-normal normal-case tracking-normal text-faint">
-            due date auto-fills from {selectedSupplier.name}'s {fmtTerm(selectedSupplier.paymentTermDays)} terms - add a row to split into installments
+            defaults to {selectedSupplier.name}'s {fmtTerm(selectedSupplier.paymentTermDays)} terms
           </span>
         )}
       </FormSection>
+      {/* COD / 7 / 15 / 30 days, one row each; Custom is the editor below. */}
+      <div className="mb-[10px] flex flex-wrap gap-[6px]" role="group" aria-label="Payment terms">
+        {PURCHASE_TERMS.map((t) => {
+          const due = addDaysISO(form.date, t.days)
+          const on = form.installments.length === 1 && form.installments[0].dueDate === due
+          return (
+            <button
+              key={t.label}
+              type="button"
+              aria-pressed={on}
+              onClick={() => set('installments', [{ id: form.installments[0]?.id ?? nanoid(8), principal: Math.round(form.totalPrice * 100) / 100, interestPct: 0, dueDate: due, status: purchaseInstallmentStatusOptions[0].value }])}
+              className={`cursor-pointer rounded-full border px-[12px] py-[5px] font-meta text-[12px] font-semibold transition-colors ${
+                on ? 'border-ink bg-ink text-white' : 'border-line bg-white text-lab hover:border-inputline'
+              }`}
+            >
+              {t.label}
+            </button>
+          )
+        })}
+        <span className={`rounded-full border px-[12px] py-[5px] font-meta text-[12px] font-semibold ${
+          form.installments.length > 1 || (form.installments.length === 1 && !PURCHASE_TERMS.some((t) => addDaysISO(form.date, t.days) === form.installments[0].dueDate))
+            ? 'border-ink bg-ink text-white' : 'border-dashed border-inputline text-mut'
+        }`}>
+          Custom
+        </span>
+      </div>
       {problem('installments') && (
         <p className="m-0 mb-2 font-meta text-[12px] font-semibold text-redtext">{problem('installments')}</p>
       )}
@@ -1040,8 +1319,9 @@ function PurchaseForm({ open, onClose, editing, suppliers, warehouses, bankAccou
           totalPrice: form.totalPrice,
           termDays: selectedSupplier?.paymentTermDays,
           pendingStatus: purchaseInstallmentStatusOptions[0].value,
-        })}
+        }).filter((p) => !/COD/.test(p.label))}
       />
+      </fieldset>
     </Dialog>
   )
 }
@@ -1051,11 +1331,14 @@ function newPurchaseForm() {
     supplierId: '',
     date: todayISO(),
     totalPrice: 0,
+    unitPrice: 0,
     volumeLiters: 0,
     fulfillment: 'delivered' as Purchase['fulfillment'],
     address: '',
+    hauler: { name: '', contact: '', date: '', fee: 0, paymentMode: 'bank_transfer', status: 'unpaid' } as NonNullable<Purchase['hauler']>,
     warehouseId: '',
     productId: '',
+    productLabel: '',
     poReferenceNo: '',
     status: 'ordered' as Purchase['status'],
     paymentMode: 'bank_transfer' as Purchase['paymentMode'],
@@ -1076,17 +1359,25 @@ function purchaseToForm(p: Purchase) {
     supplierId: p.supplierId,
     date: p.date.slice(0, 10),
     totalPrice: Math.round(p.volumeLiters * p.pricePerLiter * 100) / 100,
+    unitPrice: p.pricePerLiter,
     volumeLiters: p.volumeLiters,
     fulfillment: p.fulfillment,
     address: p.address ?? '',
+    hauler: {
+      haulerId: p.hauler?.haulerId,
+      name: p.hauler?.name ?? '', contact: p.hauler?.contact ?? '', date: p.hauler?.date ? p.hauler.date.slice(0, 10) : '',
+      fee: p.hauler?.fee ?? 0, paymentMode: p.hauler?.paymentMode ?? 'bank_transfer', status: p.hauler?.status ?? 'unpaid',
+    } as NonNullable<Purchase['hauler']>,
     warehouseId: p.warehouseId,
     productId: p.productId ?? '',
+    productLabel: p.productLabel ?? '',
     poReferenceNo: p.poReferenceNo ?? '',
     status: p.status,
     paymentMode: p.paymentMode,
     bankAccountId: p.bankAccountId ?? '',
     installments: p.installments.map((i): InstallmentRow => ({
       id: i.id, principal: i.principal, interestPct: i.interestPct, dueDate: i.dueDate.slice(0, 10), status: i.status,
+      referenceNo: i.referenceNo, notes: i.notes,
     })),
   }
 }

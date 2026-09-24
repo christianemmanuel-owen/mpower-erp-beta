@@ -1,8 +1,8 @@
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { api } from './api'
 import type {
-  Agent, Announcement, AttendanceRecord, BankAccount, Customer, DashboardConfig, DashboardLayout, Delivery,
-  DrugTest, Holiday, HrSettingsRecord, LeaveRecord, PayrollRun, Personnel, PricePosting,
+  Agent, Announcement, AppSetting, AttendanceRecord, BankAccount, Customer, DashboardConfig, DashboardLayout, Delivery,
+  DrugTest, Hauler, Holiday, HrSettingsRecord, LeaveRecord, PayrollRun, Personnel, PricePosting,
   Product, Purchase, Sale, Seat, Shift, StockThreshold, Supplier, SupplierQuote, Todo,
   Truck, TruckBanRule, VehicleMaintenance, Warehouse,
 } from '../data/types'
@@ -10,6 +10,7 @@ import type {
 /** Row type per table - mirrors what the server stores under each tbl. */
 export interface Tables {
   suppliers: Supplier
+  haulers: Hauler
   warehouses: Warehouse
   agents: Agent
   customers: Customer
@@ -38,6 +39,8 @@ export interface Tables {
   truckBanRules: TruckBanRule
   dashboardConfigs: DashboardConfig
   dashboardLayouts: DashboardLayout
+  /** Admin-written system configuration; see AppSetting. */
+  appSettings: AppSetting
 }
 
 export type TableName = keyof Tables
@@ -51,6 +54,16 @@ export function fetchTable<K extends TableName>(name: K): Promise<Tables[K][]> {
 /** All rows of one table, kept fresh by polling - undefined while loading. */
 export function useTable<K extends TableName>(name: K): Tables[K][] | undefined {
   return useQuery({ queryKey: tableKey(name), queryFn: () => fetchTable(name) }).data
+}
+
+/**
+ * One table, only when this seat may read it - undefined while loading or
+ * when not asked for. For the tables the server gates (HR's, say): asking
+ * for one the seat cannot read is a 403, and a 403 in useTables leaves the
+ * whole screen blank for ever, since it waits on every query to resolve.
+ */
+export function useTableIf<K extends TableName>(name: K, enabled: boolean): Tables[K][] | undefined {
+  return useQuery({ queryKey: tableKey(name), queryFn: () => fetchTable(name), enabled }).data
 }
 
 /** Several tables at once (the common dashboard/board pattern) -

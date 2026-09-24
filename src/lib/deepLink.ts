@@ -24,7 +24,9 @@ export const RECORD_PARAM = 'record'
 
 /** Which module screen owns each table. */
 const MODULE_PATH: Record<string, string> = {
-  purchases: '/inventory',
+  // The Purchases subpage, not the Levels one, so a purchase opens on the
+  // screen that lists purchases.
+  purchases: '/inventory/purchases',
   sales: '/sales',
   deliveries: '/logistics',
   customers: '/accounts',

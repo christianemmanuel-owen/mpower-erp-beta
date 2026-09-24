@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --force",
+    "check": "npm run typecheck && npm run lint && vitest run",
     "lint": "oxlint",
     "preview": "vite preview",
     "dev:api": "wrangler pages dev dist --port 8788",

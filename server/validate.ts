@@ -37,6 +37,14 @@ const CREATE_STATUSES: Record<string, readonly string[]> = {
   deliveries: ['scheduled'],
 }
 
+/** What an installment's status may be. The sale side is the custody chain
+ *  from src/data/types.ts; a value outside it would sit in no queue and on no
+ *  board, which is how money goes missing without anybody deleting anything. */
+const INSTALLMENT_STATUSES: Record<string, readonly string[]> = {
+  sales: ['pending', 'collected', 'deposited', 'cleared', 'bounced', 'cancelled'],
+  purchases: ['pending', 'paid', 'cancelled'],
+}
+
 /** Fields that must be a finite number and never negative. */
 const NON_NEGATIVE: Record<string, readonly string[]> = {
   sales: ['volumeLiters', 'pricePerLiter'],
@@ -60,13 +68,17 @@ function checkNumbers(tbl: string, body: Rec): Problem[] {
   return out
 }
 
-function checkInstallments(body: Rec): Problem[] {
+function checkInstallments(tbl: string, body: Rec): Problem[] {
   const list = body.installments
   if (list === undefined) return []
   if (!Array.isArray(list)) return [{ field: 'installments', message: 'installments must be a list.' }]
   const out: Problem[] = []
+  const allowed = INSTALLMENT_STATUSES[tbl]
   list.forEach((raw, i) => {
     const item = raw as Rec
+    if (allowed && typeof item.status === 'string' && !allowed.includes(item.status)) {
+      out.push({ field: `installments[${i}].status`, message: `${item.status} is not a valid payment status.` })
+    }
     for (const field of ['principal', 'amount']) {
       const v = item[field]
       if (v === undefined) continue
@@ -101,6 +113,6 @@ export function validateRecord(tbl: string, body: Rec, mode: 'create' | 'update'
   }
 
   problems.push(...checkNumbers(tbl, body))
-  problems.push(...checkInstallments(body))
+  problems.push(...checkInstallments(tbl, body))
   return problems
 }

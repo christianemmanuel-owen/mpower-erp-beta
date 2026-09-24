@@ -1,4 +1,4 @@
-import { fmtCompactPeso, fmtCurrency, fmtDate, fmtLiters } from '../../lib/format'
+import { fmtCurrency, fmtDate, fmtLiters } from '../../lib/format'
 import { isInstallmentOverdue, saleInstallmentEntries, stockFor } from '../../lib/metrics'
 import { recordHref } from '../../lib/deepLink'
 import type {
@@ -127,7 +127,7 @@ export function attentionRows(input: AttentionInput): AttentionRow[] {
       detail: 'Smaller amounts, same rule',
       // Many different ages rolled into one row; no single number is honest.
       age: '',
-      value: fmtCompactPeso(total),
+      value: fmtCurrency(total),
       tone: 'act',
       href: '/collection',
       cta: 'Open',

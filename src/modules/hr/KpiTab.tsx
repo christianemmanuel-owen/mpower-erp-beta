@@ -1,7 +1,7 @@
 import { useTables } from '../../lib/data'
 import { useRange } from '../../lib/range'
 import {
-  Avatar, Card, Chip, DataTable, ExportButton, InfoTip, KpiStrip, Meter, td,
+  Avatar, Card, Chip, DataTable, ExportButton, InfoTip, KpiStrip, Meter, td, PageSkeleton,
 } from '../../components/ui'
 import { fmtCompactPeso, fmtLiters } from '../../lib/format'
 import { inRange, agentStats } from '../../lib/metrics'
@@ -34,7 +34,7 @@ export default function KpiTab() {
   const { range } = useRange()
   const { config } = useHrConfig()
   const data = useTables(['personnel', 'sales', 'agents'] as const)
-  if (!data) return null
+  if (!data) return <PageSkeleton />
   const { personnel, sales, agents } = data
 
   const quota = new Map(agentStats(agents, sales, range).map((s) => [s.agent.id, s]))

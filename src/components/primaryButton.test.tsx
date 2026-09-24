@@ -25,9 +25,9 @@ describe('PrimaryButton', () => {
     const md = render(<PrimaryButton>Save</PrimaryButton>).container.innerHTML
     cleanup()
     const sm = render(<PrimaryButton size="sm">Save</PrimaryButton>).container.innerHTML
-    expect(md).toContain('h-[34px]')
+    expect(md).toContain('h-[36px]')
     expect(sm).toContain('h-[28px]')
-    expect(sm).not.toContain('h-[34px]')
+    expect(sm).not.toContain('h-[36px]')
   })
 
   it('is one of the two standard heights, whichever size it is', () => {
@@ -35,7 +35,7 @@ describe('PrimaryButton', () => {
     // button in it. Anything that regresses to a third height fails here.
     for (const size of ['sm', 'md'] as const) {
       const html = render(<PrimaryButton size={size}>Save</PrimaryButton>).container.innerHTML
-      expect(/h-\[(28|34)px\]/.test(html)).toBe(true)
+      expect(/h-\[(28|36)px\]/.test(html)).toBe(true)
       cleanup()
     }
   })

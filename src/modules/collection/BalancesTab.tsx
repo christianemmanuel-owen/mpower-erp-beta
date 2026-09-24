@@ -1,6 +1,8 @@
 import { AGING_BUCKETS, outstandingByCustomer } from '../../lib/metrics'
 import { fmtCurrency, fmtDate } from '../../lib/format'
 import { Card, DataTable, InfoTip, td } from '../../components/ui'
+import { Link } from 'react-router-dom'
+import { recordHref } from '../../lib/deepLink'
 import type { Customer, Personnel, Sale } from '../../data/types'
 
 const bucketLabels: Record<string, string> = {
@@ -37,8 +39,10 @@ export default function BalancesTab({ sales, customers, personnel }: {
         {/* The page above this card is called Outstanding balances too. */}
         <span className="font-meta text-[12px] text-mut">{balances.length} with a balance</span>
         <InfoTip label="How the ageing columns work">
-          Buckets are days past due, so a balance moves right as it ages. A customer’s buckets sum to
-          their outstanding. The same boundaries age the To collect card on Home.
+          Buckets are days past due, so a balance moves right as it ages. Money collected but not
+          yet cleared - a check in hand or at the bank - is on the balance but in no bucket, since it
+          is not late; it shows as “in flight” under the name. The same boundaries age the To collect
+          card on Home.
         </InfoTip>
       </div>
       <DataTable
@@ -54,8 +58,13 @@ export default function BalancesTab({ sales, customers, personnel }: {
           return (
             <tr key={b.customerId} className="hover:bg-hovrow">
               <td className={`${td} pl-[14px]`}>
-                <p className="m-0 font-semibold">{c?.company ?? '—'}</p>
-                <p className="m-0 text-[12px] text-faint">{b.openCount} open installment{b.openCount === 1 ? '' : 's'}</p>
+                {/* The customer opens their account - the sales, the terms,
+                    the credit history behind this balance. */}
+                <Link to={recordHref('customers', b.customerId) ?? '#'} className="m-0 block font-semibold text-ink no-underline hover:underline">{c?.company ?? '—'}</Link>
+                <p className="m-0 text-[12px] text-faint">
+                  {b.openCount} open installment{b.openCount === 1 ? '' : 's'}
+                  {b.inFlight > 0 && <> · {fmtCurrency(b.inFlight).replace('.00', '')} in flight</>}
+                </p>
               </td>
               <td className={`${td} whitespace-nowrap text-right`}>
                 <p className="m-0 font-semibold">{peso(b.outstanding)}</p>

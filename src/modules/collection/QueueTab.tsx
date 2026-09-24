@@ -1,8 +1,11 @@
 import { useState } from 'react'
-import { Card, Chip, DataTable, MiniDark, TabBar, filterCls, td } from '../../components/ui'
+import { Card, Chip, DataTable, MiniDark, RowAction, TabBar, filterCls, td } from '../../components/ui'
 import { fmtCurrency, fmtDate, label } from '../../lib/format'
+import { RecordLink } from '../../lib/peek'
+import { recordHref } from '../../lib/deepLink'
 import {
   installmentBankAccount, installmentCollector, isInstallmentOverdue, openReceivables,
+  saleInstallmentEntries,
 } from '../../lib/metrics'
 import { compareValues, useSortableTable } from '../../lib/sort'
 import CollectionBoard from './CollectionBoard'
@@ -29,11 +32,15 @@ export default function QueueTab({
   personnel: Personnel[]
   bankAccounts: BankAccount[]
   agents: Agent[]
+  /**
+   * Asks to settle an installment on a given outcome - a drag on the board, or
+   * the cancel action on a row. Both open the settle dialog on that outcome
+   * rather than writing it, so Exhibit A 1.6's reason and reference number are
+   * still asked for. Cancelling a receivable in one click used to skip them.
+   */
   onMove: (saleId: string, installmentId: string, status: CollectionStatus) => void
   onAssign: (saleId: string, installmentId: string, collectorId: string | null) => void
-  /** Opens the settle drawer, where Exhibit A 1.6's reference number, receiving
-   * account and reason are captured. The plain onMove stays for the kanban,
-   * where a drag is a status change and nothing more. */
+  /** Opens the settle dialog with no outcome chosen for you. */
   onSettle: (saleId: string, installmentId: string) => void
 }) {
   const [view, setView] = useState<'table' | 'board'>('table')
@@ -67,6 +74,25 @@ export default function QueueTab({
     .sort((a, b) => sort
       ? compareValues(sortAccessors[sort.key](a), sortAccessors[sort.key](b), sort.dir)
       : a.installment.dueDate.localeCompare(b.installment.dueDate))
+
+  /**
+   * What the board shows: every installment, in all four states.
+   *
+   * The table is a worklist, so it is right for it to hold only what is still
+   * open. The board is a ledger of how collections ended, so restricting it the
+   * same way emptied the three concluded columns of everything whose parent
+   * sale had nothing left to collect - a single-payment sale that bounced had
+   * no open installment at all and vanished from the Bounced column entirely.
+   * Search and collector narrow both views alike; "Overdue only" can't, because
+   * nothing concluded is overdue, so it narrows the Pending column and leaves
+   * the rest of the board alone.
+   */
+  const boardEntries = saleInstallmentEntries(sales)
+    .filter((e) => !collectorFilter
+      || (collectorFilter === 'none' ? installmentCollector(e.sale, e.installment) === null
+        : installmentCollector(e.sale, e.installment) === collectorFilter))
+    .filter((e) => !search || (customer(e.sale.customerId)?.company ?? '').toLowerCase().includes(search.toLowerCase()))
+    .filter((e) => !overdueOnly || e.installment.status !== 'pending' || isInstallmentOverdue(e.installment))
 
   const activePersonnel = personnel.filter((p) => p.active !== false)
 
@@ -112,7 +138,10 @@ export default function QueueTab({
                   {isInstallmentOverdue(inst) && <Chip status="overdue" text="Overdue" />}
                 </td>
                 <td className={td}>
-                  <p className="m-0 font-semibold">{c?.company ?? '—'}{seq > 0 ? <span className="font-normal text-faint"> · {seq}/{s.installments.length}</span> : null}</p>
+                  <p className="m-0 font-semibold">
+                    <RecordLink to={recordHref('sales', s.id) ?? '#'} className="text-ink no-underline hover:underline">{c?.company ?? '—'}</RecordLink>
+                    {seq > 0 ? <span className="font-normal text-faint"> · {seq}/{s.installments.length}</span> : null}
+                  </p>
                   <p className="m-0 text-[12px] text-faint">{collectionAddress(c)}</p>
                 </td>
                 <td className={`${td} whitespace-nowrap text-right`}>
@@ -131,14 +160,9 @@ export default function QueueTab({
                 </td>
                 <td className={`${td} text-[12.5px] text-mut`}>{bankLabel(installmentBankAccount(s, inst)) ?? '—'}</td>
                 <td className={`${td} pr-5 text-right`}>
-                  <span className="inline-flex items-center gap-3 whitespace-nowrap">
+                  <span className="inline-flex items-center gap-[4px] whitespace-nowrap">
                     <MiniDark onClick={() => onSettle(s.id, inst.id)}>Settle</MiniDark>
-                    <button
-                      onClick={() => onMove(s.id, inst.id, 'cancelled')}
-                      className="cursor-pointer px-[2px] py-1 text-[11px] font-semibold uppercase text-faint hover:text-redtext hover:underline"
-                    >
-                      Cancel
-                    </button>
+                    <RowAction verb="cancel" label="Cancel installment" onClick={() => onMove(s.id, inst.id, 'cancelled')} />
                   </span>
                 </td>
               </tr>
@@ -147,7 +171,7 @@ export default function QueueTab({
         </DataTable>
       ) : (
         <CollectionBoard
-          sales={sales.filter((s) => rows.some((e) => e.sale.id === s.id))}
+          entries={boardEntries}
           customer={customer}
           agentName={agentName}
           collectorName={resolvedCollectorName}

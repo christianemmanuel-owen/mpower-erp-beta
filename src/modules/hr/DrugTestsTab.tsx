@@ -3,7 +3,7 @@ import { useToast } from '../../components/Toast'
 import { useTables } from '../../lib/data'
 import { repos } from '../../data/repo'
 import { ExportButton, InfoTip, MiniDark,
-  Card, Chip, DataTable, Field, GhostButton, Input, PrimaryButton, Select, Dialog, td,
+  Card, Chip, DataTable, Field, GhostButton, Input, PrimaryButton, Select, Dialog, td, PageSkeleton,
 } from '../../components/ui'
 import { todayISO, fmtDate, label } from '../../lib/format'
 import { exportTable } from '../../lib/exportXlsx'
@@ -55,7 +55,7 @@ export default function DrugTestsTab() {
   const { sort, toggle: toggleSort } = useSortableTable()
 
   const data = useTables(['personnel', 'drugTests'] as const)
-  if (!data) return null
+  if (!data) return <PageSkeleton />
   const { personnel, drugTests } = data
 
   const now = Date.now()

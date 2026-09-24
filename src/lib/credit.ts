@@ -1,4 +1,5 @@
 import type { Customer, Sale, SaleInstallment } from '../data/types'
+import { wasCollected } from './collectionStatus'
 
 /**
  * Credit history and credit score - Exhibit A 1.4.
@@ -81,11 +82,21 @@ export function isOverdue(i: SaleInstallment, asOf = Date.now()): boolean {
   return i.status === 'pending' && Date.parse(i.dueDate) < asOf
 }
 
-/** Days between the due date and when the money actually arrived. Negative means
- * early. Null when we can't tell - a record collected before `collectedAt`
- * existed has no timestamp to compare, and guessing would fabricate punctuality. */
+/**
+ * Days between the due date and when the payment reached the collector.
+ * Negative means early.
+ *
+ * Deliberately the in-hand date, not the clearing date: this figure judges
+ * whether the customer paid on time and whether the collector went and got it,
+ * and neither of them controls how long the bank takes. So it keeps counting
+ * once the item moves on to deposited and cleared - the collection did not
+ * un-happen when the cashier banked it.
+ *
+ * Null when we can't tell: a record collected before `collectedAt` existed has
+ * no timestamp to compare, and guessing would fabricate punctuality.
+ */
 export function daysLate(i: SaleInstallment): number | null {
-  if (i.status !== 'collected' || !i.collectedAt) return null
+  if (!wasCollected(i.status) || !i.collectedAt) return null
   return Math.round((Date.parse(i.collectedAt) - Date.parse(i.dueDate)) / DAY)
 }
 
@@ -93,7 +104,7 @@ export function creditHistory(installments: SaleInstallment[], asOf = Date.now()
   // Cancelled installments drop out entirely - see `considered` above.
   const live = installments.filter((i) => i.status !== 'cancelled')
 
-  const collected = live.filter((i) => i.status === 'collected')
+  const collected = live.filter((i) => wasCollected(i.status))
   const bounced = live.filter((i) => i.status === 'bounced')
   const overdue = live.filter((i) => isOverdue(i, asOf))
 

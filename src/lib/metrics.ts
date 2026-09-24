@@ -5,6 +5,7 @@ import type {
 import { CONSUMING_SALE_STATUSES } from '../data/types'
 import { productKey } from './products'
 import { creditHistory, customerInstallments, type CreditHistory, type CreditRating } from './credit'
+import { isInClearing, isInHand, isOutstanding } from './collectionStatus'
 
 /**
  * Does this sale move stock and money at all?
@@ -17,25 +18,51 @@ import { creditHistory, customerInstallments, type CreditHistory, type CreditRat
  */
 export const saleCounts = (s: Sale) => (CONSUMING_SALE_STATUSES as readonly string[]).includes(s.status)
 
-/** Volume a return put back into the warehouse. Only a return *treated* as
- * restocked comes back - a refund or a write-off means the fuel is gone even
- * though the order was reversed on paper. Blank `volumeReturned` means the whole
- * order came back. */
+/** Volume a return took off the order on paper - the whole order unless the
+ * return was partial. Zero for anything that is not a returned order. */
+export function returnedVolume(s: Sale): number {
+  if (s.status !== 'returned') return 0
+  return Math.min(s.resolution?.volumeReturned ?? s.volumeLiters, s.volumeLiters)
+}
+
+/** Did the returned fuel come back into the depot? New records say so with
+ * `backToStock`; records from before that field carry it as the treatment. */
+export const cameBackToStock = (s: Sale): boolean =>
+  s.status === 'returned' && (s.resolution?.backToStock ?? s.resolution?.treatment === 'restocked')
+
+/** Volume a return physically put back into the warehouse. Only a return whose
+ * fuel came back counts - refunded, credited or replaced says what happened to
+ * the money, not to the fuel, and a rejected load that was dumped is gone. */
 export function restockedVolume(s: Sale): number {
-  if (s.status !== 'returned' || s.resolution?.treatment !== 'restocked') return 0
-  return Math.min(s.resolution.volumeReturned ?? s.volumeLiters, s.volumeLiters)
+  return cameBackToStock(s) ? returnedVolume(s) : 0
 }
 
 /**
- * Volume this sale actually consumed from stock - the figure every volume,
- * revenue and quota number is built on.
+ * SALES basis: volume this sale contributes to sales, revenue and quota.
  *
- *   draft, cancelled     → 0, nothing left the warehouse
+ * Net sales are sales less returns, full stop - the client's accounting, and
+ * the ordinary one. A returned order comes off in full (or by the partial
+ * volume) whether the money was refunded, credited, replaced or never
+ * collected, and whether or not the fuel came back. Recognised on the sale
+ * date once the order is confirmed against the client's PO, not when the
+ * fuel leaves the depot - that is the stock side, below.
+ *
+ *   draft, cancelled     → 0, the sale never happened
  *   confirmed, fulfilled → the full order
- *   returned             → the order less whatever was restocked, so a partial
- *                          return still counts for the part that stuck
+ *   returned             → the order less what was returned
  */
 export function netSaleVolume(s: Sale): number {
+  if (s.status === 'returned') return Math.max(0, s.volumeLiters - returnedVolume(s))
+  return saleCounts(s) ? s.volumeLiters : 0
+}
+
+/**
+ * STOCK basis: volume this sale leaves out of the depot, net of what came
+ * back. Differs from netSaleVolume on exactly one case - a return whose fuel
+ * did not come back: it is off the sales figure, but the litres are still
+ * gone from the tank. Inventory is not sales.
+ */
+export function stockSaleVolume(s: Sale): number {
   if (s.status === 'returned') return Math.max(0, s.volumeLiters - restockedVolume(s))
   return saleCounts(s) ? s.volumeLiters : 0
 }
@@ -71,11 +98,41 @@ export function stockByWarehouse(purchases: Purchase[], sales: Sale[]): Map<stri
     stock.set(p.warehouseId, (stock.get(p.warehouseId) ?? 0) + receivedVolume(p))
   }
   for (const s of sales) {
-    const out = netSaleVolume(s)
+    const out = stockSaleVolume(s)
     if (!out) continue
     stock.set(s.warehouseId, (stock.get(s.warehouseId) ?? 0) - out)
   }
   return stock
+}
+
+/**
+ * What a depot can still promise for a given day.
+ *
+ * Stock on hand already has every confirmed order taken off it, whenever
+ * that order is due to leave. That is the right figure for "what is in the
+ * tank that nobody has claimed", but the wrong one for an order booked for
+ * next Tuesday, when the orders due on Wednesday and after have not gone
+ * yet: those litres are still available to Tuesday's customer. So: stock on
+ * hand, plus the confirmed-but-unfulfilled orders scheduled after the date.
+ * Purchases on order are left out - they carry no arrival date, and a
+ * promise against a tanker that has not landed is a pre-sale, which the form
+ * asks to be authorised as such.
+ */
+export function stockOnDate(purchases: Purchase[], sales: Sale[], warehouseId: string, dateISO: string): {
+  onHand: number
+  /** Confirmed orders leaving after the date, whose litres are still there on it. */
+  leavingLater: number
+  available: number
+} {
+  const onHand = stockByWarehouse(purchases, sales).get(warehouseId) ?? 0
+  const day = dateISO.slice(0, 10)
+  let leavingLater = 0
+  for (const s of sales) {
+    if (s.warehouseId !== warehouseId || s.status !== 'confirmed') continue
+    const when = (s.scheduleDate ?? s.date).slice(0, 10)
+    if (when > day) leavingLater += s.volumeLiters
+  }
+  return { onHand, leavingLater, available: onHand + leavingLater }
 }
 
 /**
@@ -102,7 +159,7 @@ export function stockFor(
   }
   for (const s of sales) {
     if (s.warehouseId !== warehouseId || productKey(s.productId) !== want) continue
-    stock -= netSaleVolume(s)
+    stock -= stockSaleVolume(s)
   }
   return stock
 }
@@ -249,7 +306,7 @@ export function stockMovements(
   }
 
   for (const s of sales) {
-    const gone = netSaleVolume(s) + restockedVolume(s)
+    const gone = stockSaleVolume(s) + restockedVolume(s)
     if (gone > 0) {
       out.push({
         id: `out-${s.id}`,
@@ -365,7 +422,7 @@ export function stockSeries(
     }
     for (const s of sales) {
       if (s.date <= cutoff && s.warehouseId in values) {
-        values[s.warehouseId] -= netSaleVolume(s)
+        values[s.warehouseId] -= stockSaleVolume(s)
       }
     }
     series.push({ t, values })
@@ -399,7 +456,7 @@ export function flowSeries(purchases: Purchase[], sales: Sale[], range: DateRang
   }
   for (const s of sales) {
     if (!inRange(s.date, range)) continue
-    sold[bucketOf(s.date)] += netSaleVolume(s)
+    sold[bucketOf(s.date)] += stockSaleVolume(s)
   }
   return bought.map((b, i) => ({
     t: Math.round(from + (i / (buckets - 1 || 1)) * (to - from)),
@@ -483,9 +540,21 @@ export function purchaseInstallmentEntries(purchases: Purchase[]): PurchaseInsta
 
 export interface AgentStat {
   agent: Agent
+  /** Net litres sold in the range - cancellations and returns taken off. */
   volume: number
+  /** Those same litres at the price each was sold at. */
   revenue: number
-  /** Progress vs quota prorated to the number of months in the range (min 1). */
+  /**
+   * The agent's monthly quota, prorated to the length of the range (min 1
+   * month's worth), in litres.
+   *
+   * Carried on the stat because the percentage beside it is unreadable
+   * without it: quotas here run from 40,000 to 60,000 L, so the same 62% is
+   * different work for different people, and over a 7-day range it isn't the
+   * monthly quota being measured against at all.
+   */
+  quota: number
+  /** volume ÷ quota. Zero when the agent has no quota set. */
   quotaProgress: number
   rank: number
 }
@@ -643,7 +712,7 @@ export function agentStats(agents: Agent[], sales: Sale[], range: DateRange): Ag
     const volume = own.reduce((sum, s) => sum + netSaleVolume(s), 0)
     const rev = own.reduce((sum, s) => sum + netSaleVolume(s) * s.pricePerLiter, 0)
     const quota = agent.monthlyQuotaLiters * months
-    return { agent, volume, revenue: rev, quotaProgress: quota > 0 ? volume / quota : 0, rank: 0 }
+    return { agent, volume, revenue: rev, quota, quotaProgress: quota > 0 ? volume / quota : 0, rank: 0 }
   })
   stats.sort((a, b) => b.volume - a.volume)
   stats.forEach((s, i) => {
@@ -665,11 +734,78 @@ export function installmentBankAccount(sale: Sale, inst: SaleInstallment): strin
   return inst.bankAccountId ?? sale.bankAccountId ?? null
 }
 
-/** The collection work queue: every still-pending installment of a non-draft sale. The shared
- * source for the Collection module's queue, board, calendar, and KPIs - collected/cancelled
- * installments and draft sales never appear. */
+/**
+ * The collector's work queue: money nobody has gone and got yet.
+ *
+ * Deliberately narrower than "what the customer still owes". Once a check is
+ * in the collector's hands their part is done, so it leaves this queue - but it
+ * is not paid, and `unsettledReceivables` below is what the account's balance
+ * is built from. Keeping the two apart is what stops the queue nagging a
+ * collector about a check already sitting in the office safe.
+ */
 export function openReceivables(sales: Sale[]): SaleInstallmentEntry[] {
   return saleInstallmentEntries(sales).filter((e) => e.installment.status === 'pending')
+}
+
+/**
+ * What the customer still actually owes: everything not yet cleared.
+ *
+ * A check in hand and a check in clearing are both money the bank has not paid
+ * out, and either can still be refused, so both stay on the balance. The
+ * happy consequence is that a bounce needs no reversal anywhere - the amount
+ * was never taken off what was owed in the first place.
+ */
+export function unsettledReceivables(sales: Sale[]): SaleInstallmentEntry[] {
+  return saleInstallmentEntries(sales).filter((e) => isOutstanding(e.installment.status))
+}
+
+/**
+ * The treasury's deposit queue: paper in somebody's hands, not yet banked.
+ *
+ * Ordered by when each item became bankable rather than by when it arrived - a
+ * post-dated check collected three weeks early cannot be deposited until the
+ * date written on it, so sorting by collection date would put items at the top
+ * that the bank would simply refuse. `depositDue` is that date: the check's
+ * own, or the day it was received when there is no check.
+ */
+export function undepositedItems(sales: Sale[]): Array<SaleInstallmentEntry & { depositDue: string }> {
+  return saleInstallmentEntries(sales)
+    .filter((e) => isInHand(e.installment.status))
+    .map((e) => ({
+      ...e,
+      depositDue: e.installment.checkDate ?? e.installment.collectedAt ?? e.installment.dueDate,
+    }))
+    .sort((a, b) => a.depositDue.localeCompare(b.depositDue))
+}
+
+/** Banked and waiting on the bank to say yes or no. */
+/**
+ * Everything that has been banked, newest first: in clearing, cleared, or
+ * bounced. The Deposits page's history - "did we bank that check, when, and
+ * what did the bank say" - which had no screen: a deposit left the queue and
+ * was only findable inside its sale.
+ */
+export function depositedItems(sales: Sale[]): SaleInstallmentEntry[] {
+  return saleInstallmentEntries(sales)
+    .filter((e) => !!e.installment.depositedAt && (isInClearing(e.installment.status) || e.installment.status === 'cleared' || e.installment.status === 'bounced'))
+    .sort((a, b) => (b.installment.depositedAt ?? '').localeCompare(a.installment.depositedAt ?? ''))
+}
+
+export function itemsInClearing(sales: Sale[]): SaleInstallmentEntry[] {
+  return saleInstallmentEntries(sales)
+    .filter((e) => isInClearing(e.installment.status))
+    .sort((a, b) => (a.installment.depositedAt ?? '').localeCompare(b.installment.depositedAt ?? ''))
+}
+
+/**
+ * A deposit that is late: the check could have been banked and wasn't.
+ *
+ * The number worth watching in this whole change. Cash or a matured check
+ * sitting undeposited is the one position where the company's money is in a
+ * single person's custody with no bank record of it.
+ */
+export function depositOverdue(depositDue: string, asOf = Date.now()): boolean {
+  return Date.parse(depositDue) < asOf
 }
 
 export const AGING_BUCKETS = ['current', '1-30', '31-60', '61-90', '90+'] as const
@@ -690,7 +826,14 @@ export function agingBucketOf(dueDate: string, today = new Date().toISOString())
 
 export interface CustomerBalance {
   customerId: string
+  /** Everything not yet cleared: still to collect, plus in hand or at the bank. */
   outstanding: number
+  /**
+   * Collected but not yet money: in a collector's hands or at the bank. Part
+   * of `outstanding`, and outside the ageing buckets, because a check sitting
+   * in clearing is not late - it is just not paid yet.
+   */
+  inFlight: number
   overdue: number
   /** Outstanding amount per aging bucket - buckets sum to `outstanding`. */
   aging: Record<AgingBucket, number>
@@ -701,23 +844,29 @@ export interface CustomerBalance {
   collectorIds: string[]
 }
 
-/** Per-customer outstanding balances from open receivables, sorted by outstanding descending.
- * Customers with nothing open are omitted. "Overdue" here is bucket-based (whole days past due,
+/** Per-customer balances from everything not yet cleared, sorted by outstanding descending.
+ * Customers owing nothing are omitted. "Overdue" here is bucket-based (whole days past due,
  * so due-today counts as current) - the day-granular cousin of isInstallmentOverdue, injectable
  * with a fixed `today` so reports and tests are deterministic. */
 export function outstandingByCustomer(sales: Sale[], today = new Date().toISOString()): CustomerBalance[] {
   const byCustomer = new Map<string, CustomerBalance>()
-  for (const { sale, installment } of openReceivables(sales)) {
+  for (const { sale, installment } of unsettledReceivables(sales)) {
     let b = byCustomer.get(sale.customerId)
     if (!b) {
       b = {
-        customerId: sale.customerId, outstanding: 0, overdue: 0,
+        customerId: sale.customerId, outstanding: 0, inFlight: 0, overdue: 0,
         aging: { 'current': 0, '1-30': 0, '31-60': 0, '61-90': 0, '90+': 0 },
         nextDue: null, openCount: 0, collectorIds: [],
       }
       byCustomer.set(sale.customerId, b)
     }
     b.outstanding += installment.amount
+    // Collected but not cleared: on the balance, not in the ageing. It has
+    // been collected, so it is neither open nor late.
+    if (installment.status !== 'pending') {
+      b.inFlight += installment.amount
+      continue
+    }
     b.openCount += 1
     const bucket = agingBucketOf(installment.dueDate, today)
     b.aging[bucket] += installment.amount
@@ -753,4 +902,231 @@ export function collectorWorkload(sales: Sale[], today = new Date().toISOString(
     if (agingBucketOf(installment.dueDate, today) !== 'current') load.overdueAmount += installment.amount
   }
   return [...byCollector.values()].sort((a, b) => b.amount - a.amount)
+}
+
+// ---- Depot ledger: moving-average cost, sources, trailing cover, utilization --
+
+/**
+ * What the ledger walk knows about one depot at a point in time.
+ *
+ * `avgCost` is the moving-average cost of the litres now in the tank: every
+ * receipt re-averages its price into what was in the tank at that moment, and
+ * a sale takes litres out at that average without changing it. The weights
+ * are litres, nothing else - no time value, no interest on the earlier loads.
+ * This replaces the all-time average of every receipt, which kept counting
+ * litres long since sold: after a cheap month and an expensive one, the tank
+ * holding only the expensive fuel was still valued at the blend.
+ *
+ * `sources` is where the litres in the tank came from, by supplier, on the
+ * same mixing model: a sale draws from every supplier's litres in proportion
+ * to their share of the tank, because in a shared tank there is no other
+ * honest answer. A return goes back in at the depot's current average and is
+ * attributed to the mix as it stands.
+ */
+export interface DepotLedger {
+  onHand: number
+  /** Null until the depot has received anything. */
+  avgCost: number | null
+  /** onHand × avgCost; null when avgCost is. */
+  value: number | null
+  /** Litres in the tank by supplier id. Sums to onHand. */
+  sources: Record<ID, number>
+  /** ISO date of the depot's first movement, for windows that must not reach before it. */
+  firstMovement: string | null
+}
+
+export function depotLedger(
+  purchases: Purchase[],
+  sales: Sale[],
+  warehouseId: ID,
+  asOf?: string,
+): DepotLedger {
+  const cutoff = asOf ? `${asOf.slice(0, 10)}T23:59:59.999Z` : undefined
+  const moves = stockMovements(purchases, sales)
+    .filter((m) => m.warehouseId === warehouseId && (!cutoff || m.date <= cutoff))
+    .sort((a, b) => a.date.localeCompare(b.date) || (a.direction === 'in' ? -1 : 1))
+  const priceOf = new Map(purchases.map((p) => [p.id, p.pricePerLiter]))
+
+  let onHand = 0
+  let avgCost: number | null = null
+  const sources: Record<ID, number> = {}
+  const firstMovement = moves[0]?.date ?? null
+
+  for (const m of moves) {
+    if (m.liters > 0) {
+      const price: number = m.kind === 'receipt' ? (priceOf.get(m.recordId) ?? 0) : (avgCost ?? 0)
+      const had = Math.max(onHand, 0)
+      avgCost = had + m.liters > 0 ? ((avgCost ?? 0) * had + price * m.liters) / (had + m.liters) : price
+      if (m.kind === 'receipt' && m.counterpartyId) {
+        sources[m.counterpartyId] = (sources[m.counterpartyId] ?? 0) + m.liters
+      } else {
+        // A return: back into the mix as it stands, or to "unknown" for an empty tank.
+        const total = Object.values(sources).reduce((a, b) => a + b, 0)
+        if (total > 0) for (const k of Object.keys(sources)) sources[k] += m.liters * (sources[k] / total)
+        else sources['?'] = (sources['?'] ?? 0) + m.liters
+      }
+      onHand = had + m.liters
+    } else {
+      const gone = Math.min(-m.liters, Math.max(onHand, 0))
+      const total = Object.values(sources).reduce((a, b) => a + b, 0)
+      if (total > 0) for (const k of Object.keys(sources)) sources[k] -= gone * (sources[k] / total)
+      onHand = Math.max(onHand, 0) - gone
+    }
+  }
+  for (const k of Object.keys(sources)) if (sources[k] < 0.5) delete sources[k]
+  return {
+    onHand,
+    avgCost,
+    value: avgCost === null ? null : Math.max(onHand, 0) * avgCost,
+    sources,
+    firstMovement,
+  }
+}
+
+/** Every depot's ledger added up: value is the sum of the depots, sources the
+ *  sum of their litres, with a count of depots that could not be priced. */
+export function totalLedger(purchases: Purchase[], sales: Sale[], warehouseIds: ID[], asOf?: string) {
+  let value = 0
+  let unpriced = 0
+  let onHand = 0
+  const sources: Record<ID, number> = {}
+  for (const id of warehouseIds) {
+    const l = depotLedger(purchases, sales, id, asOf)
+    onHand += Math.max(l.onHand, 0)
+    if (l.value === null) unpriced++
+    else value += l.value
+    for (const [k, v] of Object.entries(l.sources)) sources[k] = (sources[k] ?? 0) + v
+  }
+  return { value, onHand, sources, unpriced, priced: warehouseIds.length - unpriced }
+}
+
+/**
+ * Days of cover from the last `days` days of actual sales - a fixed window
+ * ending today, independent of the date range picker.
+ *
+ * The range-based projection could be flattered two ways: a range reaching
+ * into the future divided the outflow over days that had not happened, and one
+ * reaching back before the depot traded divided it over days it could not
+ * have sold. This clips the window at the depot's first movement, and does not
+ * move when the picker does. Null when nothing went out in the window, as
+ * before: a quiet month is not proof a depot will never run dry.
+ */
+export function daysOfCoverTrailing(
+  purchases: Purchase[],
+  sales: Sale[],
+  warehouseId: ID,
+  days = 30,
+  now = new Date(),
+): { days: number | null; windowDays: number; perDay: number } {
+  const ledger = depotLedger(purchases, sales, warehouseId)
+  const onHand = Math.max(ledger.onHand, 0)
+  const end = now.toISOString().slice(0, 10)
+  let start = new Date(now.getTime() - (days - 1) * 86_400_000).toISOString().slice(0, 10)
+  if (ledger.firstMovement && ledger.firstMovement.slice(0, 10) > start) start = ledger.firstMovement.slice(0, 10)
+  const windowDays = Math.max(1, Math.round((Date.parse(end) - Date.parse(start)) / 86_400_000) + 1)
+  const { out } = warehouseFlow(purchases, sales, warehouseId, { from: start, to: end })
+  const perDay = out / windowDays
+  return { days: perDay > 0 ? onHand / perDay : null, windowDays, perDay }
+}
+
+/**
+ * How much of a depot's capacity was in use across the range: the average of
+ * the sampled fill levels, with the peak and the low. A level over time says
+ * what happened; this says whether the tank is earning its size. Null when
+ * the depot has no capacity recorded. Fill is capped at full: a balance above
+ * capacity is a recording problem (the receive dialog warns of it), and a
+ * "191% utilized" tank reads as a bug rather than a fact.
+ */
+export function utilization(
+  series: StockSeriesPoint[],
+  warehouseId: ID,
+  capacityLiters: number,
+): { avg: number; peak: number; low: number } | null {
+  if (capacityLiters <= 0 || series.length === 0) return null
+  const fills = series.map((p) => Math.min(Math.max(p.values[warehouseId] ?? 0, 0) / capacityLiters, 1))
+  return {
+    avg: fills.reduce((a, b) => a + b, 0) / fills.length,
+    peak: Math.max(...fills),
+    low: Math.min(...fills),
+  }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Sales over time                                                           */
+/* ------------------------------------------------------------------------ */
+
+export type TrendGrain = 'day' | 'week' | 'month' | 'quarter'
+
+export interface TrendPoint {
+  /** Bucket start, ms. */
+  t: number
+  /** ISO dates the bucket covers, clipped to the range. */
+  from: string
+  to: string
+  label: string
+  liters: number
+  revenue: number
+}
+
+/**
+ * The grain a range reads best at: a week per day, a month per week, a year
+ * per month, longer per quarter. The user can override it on the card.
+ */
+export function trendGrainFor(range: DateRange): TrendGrain {
+  const days = Math.round((Date.parse(range.to.slice(0, 10)) - Date.parse(range.from.slice(0, 10))) / 86_400_000) + 1
+  if (days <= 15) return 'day'
+  if (days <= 35) return 'week'
+  if (days <= 400) return 'month'
+  return 'quarter'
+}
+
+const isoDay = (t: number) => new Date(t).toISOString().slice(0, 10)
+
+/** Bucket boundaries covering the range. Weeks are 7-day windows counted from
+ * the start of the range (so "last 30 days" is four full weeks and a stub);
+ * months and quarters are calendar ones, clipped at both ends. */
+function trendBuckets(range: DateRange, grain: TrendGrain): { from: string; to: string; t: number; label: string }[] {
+  const from = Date.parse(range.from.slice(0, 10))
+  const to = Date.parse(range.to.slice(0, 10))
+  const out: { from: string; to: string; t: number; label: string }[] = []
+  const fmt = (t: number, opts: Intl.DateTimeFormatOptions) => new Date(t).toLocaleDateString('en-PH', { timeZone: 'UTC', ...opts })
+  if (grain === 'day') {
+    for (let t = from; t <= to; t += 86_400_000) out.push({ from: isoDay(t), to: isoDay(t), t, label: fmt(t, { month: 'short', day: 'numeric' }) })
+  } else if (grain === 'week') {
+    for (let t = from; t <= to; t += 7 * 86_400_000) {
+      const end = Math.min(t + 6 * 86_400_000, to)
+      out.push({ from: isoDay(t), to: isoDay(end), t, label: `${fmt(t, { month: 'short', day: 'numeric' })}–${fmt(end, { day: 'numeric' })}` })
+    }
+  } else {
+    const d = new Date(from)
+    const step = grain === 'month' ? 1 : 3
+    let y = d.getUTCFullYear()
+    let m = grain === 'month' ? d.getUTCMonth() : Math.floor(d.getUTCMonth() / 3) * 3
+    while (Date.UTC(y, m, 1) <= to) {
+      const start = Math.max(Date.UTC(y, m, 1), from)
+      const end = Math.min(Date.UTC(y, m + step, 0), to)
+      out.push({
+        from: isoDay(start), to: isoDay(end), t: start,
+        label: grain === 'month' ? fmt(Date.UTC(y, m, 1), { month: 'short', year: '2-digit' }) : `Q${m / 3 + 1} ${String(y).slice(2)}`,
+      })
+      m += step
+      if (m >= 12) { m -= 12; y += 1 }
+    }
+  }
+  return out
+}
+
+/** Net sales per bucket across the range, on the sales basis (netSaleVolume):
+ * confirmed on the client's PO, returns netted off. */
+export function salesTrend(sales: Sale[], range: DateRange, grain: TrendGrain): TrendPoint[] {
+  const buckets = trendBuckets(range, grain).map((b) => ({ ...b, liters: 0, revenue: 0 }))
+  for (const s of sales) {
+    const day = s.date.slice(0, 10)
+    const b = buckets.find((x) => day >= x.from && day <= x.to)
+    if (!b) continue
+    const v = netSaleVolume(s)
+    b.liters += v
+    b.revenue += v * s.pricePerLiter
+  }
+  return buckets
 }

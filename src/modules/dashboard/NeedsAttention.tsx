@@ -1,6 +1,8 @@
 import { todayISO } from '../../lib/format'
 import { Card } from '../../components/ui'
-import { ModuleLink } from '../../components/ModuleLink'
+import { useOpenRecord } from '../../lib/peek'
+import { GoArrow } from '../../components/ModuleLink'
+import { moduleForPath } from '../../lib/nav'
 import { useAuth } from '../../lib/auth'
 import { useApprovals } from '../../lib/approvals'
 import { attentionRows, type AttentionRow } from './attention'
@@ -59,6 +61,7 @@ export default function NeedsAttentionCard(props: {
   stockThresholds: StockThreshold[]
 }) {
   const { seat } = useAuth()
+  const openRecord = useOpenRecord()
   // Only an approver has anything to do about a parked input, so only an
   // approver is asked about them. A seat that cannot decide gets [] and the
   // row never appears.
@@ -103,7 +106,15 @@ export default function NeedsAttentionCard(props: {
               {label}
             </p>
             {group.map((r) => (
-              <div key={r.key} className="flex items-center gap-3 border-b border-linesoft px-[14px] py-[9px] last:border-0">
+              <div
+                key={r.key}
+                role="link"
+                tabIndex={0}
+                aria-label={`${r.cta ?? 'Open'} ${moduleForPath(r.href).label}: ${r.title}`}
+                onClick={() => openRecord(r.href)}
+                onKeyDown={(e) => { if (e.key === 'Enter') openRecord(r.href) }}
+                className="group flex cursor-pointer items-center gap-3 border-b border-linesoft px-[14px] py-[9px] transition-colors last:border-0 hover:bg-paper focus:outline-none focus-visible:bg-paper"
+              >
                 <span className="w-[74px] shrink-0 font-meta text-[12px] text-mut">{r.tag}</span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-[13px] font-semibold leading-[1.35]">{r.title}</span>
@@ -120,13 +131,11 @@ export default function NeedsAttentionCard(props: {
                 <span className={`tnum w-[124px] shrink-0 whitespace-nowrap text-right font-meta text-[12px] font-semibold ${toneCls[r.tone]}`}>
                   {r.value}
                 </span>
-                {/* The word was carrying less than it looked like it was: three
-                    different rows all said "Open" and went to three different
-                    modules. The destination's own icon - the same mark the nav rail
-                    uses for that module - says where the row goes, and the label
-                    that used to be printed on every line moves to the hover and to
-                    the accessible name. */}
-                <ModuleLink to={r.href} action={r.cta} />
+                {/* The whole row goes there; the arrow fades in on hover to say
+                    so, and where it goes is in the row's accessible name. */}
+                <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center text-faint opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100" aria-hidden>
+                  <GoArrow />
+                </span>
               </div>
             ))}
           </div>

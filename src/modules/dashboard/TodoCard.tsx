@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { RecordLink } from '../../lib/peek'
 import { Card, Input, SectionLabel } from '../../components/ui'
 import { useTable } from '../../lib/data'
 import { useAuth } from '../../lib/auth'
@@ -108,7 +108,7 @@ export default function TodoCard({ delay = 0 }: { delay?: number }) {
                 className="mt-[3px] cursor-pointer"
               />
               <span className={`flex-1 ${t.done ? 'text-faint line-through' : ''}`}>
-                {href ? <Link to={href} className="text-lab hover:underline">{t.text}</Link> : t.text}
+                {href ? <RecordLink to={href} className="text-lab hover:underline">{t.text}</RecordLink> : t.text}
                 {t.dueDate && (
                   <span className={`ml-2 text-[11px] ${overdue(t) ? 'font-semibold text-redtext' : 'text-faint'}`}>
                     {overdue(t) ? 'overdue · ' : ''}{fmtDate(t.dueDate)}

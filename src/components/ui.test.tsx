@@ -242,7 +242,7 @@ describe('Input and Select', () => {
 
   it('still carry the shared control styling', () => {
     render(<Input className="nospin" aria-label="Base amount" />)
-    expect(screen.getByLabelText('Base amount').className).toContain('h-[34px]')
+    expect(screen.getByLabelText('Base amount').className).toContain('h-[36px]')
   })
 })
 

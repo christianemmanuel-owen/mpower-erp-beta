@@ -6,8 +6,9 @@ import { customerStats, inRange, supplierStats, purchaseInDate,
 } from '../../lib/metrics'
 import { RangePicker, useRange } from '../../lib/range'
 import { useQuickCreate } from '../../lib/quickCreate'
+import { usePendingRecord } from '../../lib/deepLink'
 import { fmtCompactPeso, fmtCurrency, fmtDate, fmtLiters, fmtNum, label } from '../../lib/format'
-import { ExportButton, Card, Chip, DataTable, InfoTip, PageHeader, filterCls, td } from '../../components/ui'
+import { ExportButton, Card, Chip, DataTable, InfoTip, PageHeader, filterCls, td, PageSkeleton } from '../../components/ui'
 import CustomerDetail from './CustomerDetail'
 import CustomerForm from './CustomerForm'
 import { PendingBanner } from '../settings/Approvals'
@@ -33,6 +34,7 @@ export default function Accounts({ page }: { page: Page }) {
   const [formOpen, setFormOpen] = useState(false)
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null)
   const toast = useToast()
+  const [pendingRecord, clearPendingRecord] = usePendingRecord()
 
   useEffect(() => {
     if (quick.consume('quote')) setQuoteOpen(true)
@@ -43,7 +45,7 @@ export default function Accounts({ page }: { page: Page }) {
   }, [quick])
 
   const data = useTables(['customers', 'suppliers', 'sales', 'purchases', 'supplierQuotes', 'warehouses'] as const)
-  if (!data) return null
+  if (!data) return <PageSkeleton />
   const { customers, suppliers, sales, purchases, supplierQuotes: quotes, warehouses } = data
 
   // Delivered volume on both sides, per Q13 - MPower pays for what arrived, so
@@ -53,6 +55,16 @@ export default function Accounts({ page }: { page: Page }) {
   const buyCost = received.reduce((s, p) => s + receivedVolume(p) * p.pricePerLiter, 0)
   const buyVol = received.reduce((s, p) => s + receivedVolume(p), 0)
   const avgBuyCost = buyVol > 0 ? buyCost / buyVol : null
+
+  // A link from Collect's balances or a dashboard card lands here with the
+  // customer to open: its detail, over the list, the way a click on the row
+  // would. Done in the render body once the data is loaded - see
+  // usePendingRecord.
+  if (pendingRecord) {
+    const found = customers.find((c) => c.id === pendingRecord)
+    clearPendingRecord()
+    if (found) setDetail(customerStats([found], sales, range, avgBuyCost)[0] ?? null)
+  }
 
   const cStats = customerStats(customers, sales, range, avgBuyCost)
     .filter((s) => !search || s.customer.company.toLowerCase().includes(search.toLowerCase()))

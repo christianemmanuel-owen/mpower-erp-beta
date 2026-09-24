@@ -21,7 +21,7 @@ import * as audit from './audit'
  * rejected, so a typo in a component can't quietly create a new document type. */
 export const SLOTS: Record<string, readonly string[]> = {
   // 1.2 Inventory
-  purchases: ['supplierPo', 'supplierDeliveryReceipt', 'fuelAnalysisSlip'],
+  purchases: ['supplierPo', 'supplierInvoice', 'permitToLoad', 'supplierDeliveryReceipt', 'fuelAnalysisSlip', 'paymentProof'],
   // 1.3 Sales, and 1.6 Collection - collections aren't records of their own
   // (an installment lives inside its sale), so their documents file against the
   // sale that owes the money.

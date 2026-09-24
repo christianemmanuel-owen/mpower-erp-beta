@@ -32,8 +32,11 @@ export interface Attachment {
 export const SLOT_LABELS: Record<string, string> = {
   // Inventory (1.2)
   supplierPo: 'Purchase order to supplier',
+  supplierInvoice: 'Supplier invoice',
+  permitToLoad: 'Permit to load',
   supplierDeliveryReceipt: 'Supplier delivery receipt',
   fuelAnalysisSlip: 'Fuel analysis slip',
+  paymentProof: 'Proof of payment to supplier',
   // Sales (1.3)
   clientPo: 'Purchase order from client',
   // Accounts (1.4) - account opening checklist

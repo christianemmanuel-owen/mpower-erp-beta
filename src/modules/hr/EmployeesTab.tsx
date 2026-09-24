@@ -8,7 +8,7 @@ import {
 import { fmtCurrency, label } from '../../lib/format'
 import {
   InfoTip, Avatar, Card, Chip, DataTable, Dialog, Field, FormSection, GhostButton, Input,
-  PrimaryButton, Select, Switch, filterCls, td,
+  PrimaryButton, Select, Switch, filterCls, td, WIDE_DIALOG, PageSkeleton,
 } from '../../components/ui'
 import { FormNav, useSectionNav, type FormNavSection } from '../../components/FormNav'
 import { RailAside, RailClose, RailRow, RailSection } from '../../components/SummaryRail'
@@ -28,7 +28,7 @@ export default function EmployeesTab() {
   const [editing, setEditing] = useState<Personnel | null>(null)
   const [error, setError] = useState('')
 
-  if (!data) return null
+  if (!data) return <PageSkeleton />
   const { personnel, agents, shifts } = data
 
   const employees = personnel
@@ -281,7 +281,7 @@ function EmployeeForm({ open, employee, agents, shifts, onClose, onError }: {
         ? `${label(String(f.role))}${f.active ? '' : ' · Inactive'}`
         : 'Everyone Trips, attendance and payroll can see'}
       onClose={onClose}
-      width={1000}
+      width={WIDE_DIALOG}
       nav={<FormNav sections={navSections} active={activeSection} onJump={jump} />}
       rail={
         <>

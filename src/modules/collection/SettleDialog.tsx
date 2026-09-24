@@ -1,12 +1,16 @@
 import { useEffect, useState } from 'react'
+import { Printer } from 'lucide-react'
 import {
-  Field, FormSection, GhostButton, Input, PrimaryButton, SectionLabel, Select, Dialog,
+  ChoiceCard, Choices, Field, GhostButton, Input, PrimaryButton, Select, Step, Dialog,
 } from '../../components/ui'
+import { RailAside, RailClose, RailRow, RailSection } from '../../components/SummaryRail'
 import DocumentUpload from '../../components/DocumentUpload'
+import PaymentPath from '../../components/PaymentPath'
 import { allocateReference } from '../../lib/attachments'
 import { printDocument } from '../../lib/printDoc'
 import { fmtCurrency, fmtDate, label } from '../../lib/format'
 import { daysLate } from '../../lib/credit'
+import { bouncedFor, bouncedNote } from '../../lib/bouncedChecks'
 import { installmentBankAccount, installmentCollector } from '../../lib/metrics'
 import type {
   BankAccount, CollectionStatus, Customer, Personnel, Sale, SaleInstallment,
@@ -21,24 +25,45 @@ import type {
  * reason. Those are the fields that make a collection auditable months later,
  * and none of them can be recovered afterwards from a status alone.
  *
- * `bounced` is a first-class outcome here rather than a variety of "not
- * collected". A post-dated check that bounces is a specific, recurring event in
- * this business: the money was promised, presented, and refused. It counts
- * against the account's credit history and the collector's rate, which a plain
- * "still pending" would not.
+ * The outcome is four cards rather than a dropdown, because each one does
+ * something different to the account's credit history and the collector's
+ * rate, and a dropdown hides three of the four consequences at any moment.
+ * `bounced` is first-class among them: a post-dated check that bounces is a
+ * specific, recurring event here - the money was promised, presented and
+ * refused - and it counts against both, which a plain "still pending" would
+ * not. The rail says what this settlement does before it is saved, including
+ * what the customer's bounced checks already add up to in law.
  */
 
-const STATUS_OPTIONS: ReadonlyArray<{ value: CollectionStatus; label: string; hint: string }> = [
-  { value: 'collected', label: 'Collected', hint: 'The money arrived.' },
-  { value: 'bounced', label: 'Bounced', hint: 'A post-dated check was presented and refused. Counts against the account and the collector.' },
-  { value: 'pending', label: 'Still pending', hint: 'Not collected yet - record why below.' },
-  { value: 'cancelled', label: 'Cancelled', hint: 'No longer collectable. Excluded from collection performance entirely.' },
+const STATUS_OPTIONS: ReadonlyArray<{
+  value: CollectionStatus
+  label: string
+  hint: string
+  tone?: 'bad'
+}> = [
+  // "Collected" is a custody fact, not a money fact: the collector has it.
+  // Banking it is Treasury's, and until the bank pays out the customer
+  // still owes it - which is why this no longer says "the money arrived".
+  { value: 'collected', label: 'Collected', hint: 'Received from the customer.' },
+  { value: 'bounced', label: 'Bounced', hint: 'A check was presented and refused.', tone: 'bad' },
+  { value: 'pending', label: 'Still pending', hint: 'Not collected yet - say why below.' },
+  { value: 'cancelled', label: 'Cancelled', hint: 'No longer collectable.' },
 ]
 
 export default function SettleDialog({
-  entry, customers, personnel, bankAccounts, onClose, onSave, onNotice,
+  entry, sales, customers, personnel, bankAccounts, onClose, onSave, onNotice, readOnly = false,
 }: {
-  entry: { sale: Sale; installment: SaleInstallment } | null
+  /** A seat outside Collect looking at a collection - a treasurer from the
+   *  calendar. Disabled throughout; the footer only closes. */
+  readOnly?: boolean
+  /**
+   * The installment to settle, and optionally the outcome to open on - set
+   * when the dialog was reached by dragging a card into a column, so the drop
+   * you made is the choice already selected when the form appears.
+   */
+  entry: { sale: Sale; installment: SaleInstallment; preset?: CollectionStatus } | null
+  /** Every sale, for the customer's bounced-check history. */
+  sales: Sale[]
   customers: Customer[]
   personnel: Personnel[]
   bankAccounts: BankAccount[]
@@ -52,19 +77,24 @@ export default function SettleDialog({
   const [collectorId, setCollectorId] = useState('')
   const [bankAccountId, setBankAccountId] = useState('')
   const [collectedOn, setCollectedOn] = useState('')
+  const [checkOn, setCheckOn] = useState('')
   const [formNo, setFormNo] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!entry) return
-    const { sale, installment } = entry
-    setStatus(installment.status === 'pending' ? 'collected' : installment.status)
+    const { sale, installment, preset } = entry
+    setStatus(preset ?? (installment.status === 'pending' ? 'collected' : installment.status))
     setReferenceNo(installment.referenceNo ?? '')
     setNotes(installment.notes ?? '')
     setCollectorId(installmentCollector(sale, installment) ?? '')
     setBankAccountId(installmentBankAccount(sale, installment) ?? '')
     setCollectedOn((installment.collectedAt ?? new Date().toISOString()).slice(0, 10))
+    // Defaults to the due date, which is what a post-dated check is normally
+    // written for, but it is the collector's to correct from the check in
+    // front of them - it decides when Treasury may bank it.
+    setCheckOn((installment.checkDate ?? installment.dueDate).slice(0, 10))
     setFormNo(installment.collectionFormNo ?? '')
     setError(null)
   }, [entry])
@@ -72,7 +102,8 @@ export default function SettleDialog({
   if (!entry) return null
   const { sale, installment } = entry
   const customer = customers.find((c) => c.id === sale.customerId)
-  const chosen = STATUS_OPTIONS.find((o) => o.value === status)
+  /** Nothing to hold or present: received is settled. */
+  const oneStep = sale.paymentMode === 'bank_transfer'
 
   // Collection details come from the account's collection contact point, which
   // Exhibit A 1.4 keeps separate from the office and delivery addresses.
@@ -83,9 +114,18 @@ export default function SettleDialog({
 
   // Preview of how this will land in the collector's on-time rate, computed the
   // same way collectionRate() will once it is saved.
-  const preview = status === 'collected' && collectedOn
+  const late = status === 'collected' && collectedOn
     ? daysLate({ ...installment, status: 'collected', collectedAt: new Date(collectedOn).toISOString() })
     : null
+
+  // What this customer's bounced checks already come to - worth knowing while
+  // recording another one, or while deciding to take a replacement check.
+  const bounced = bouncedFor(sale.customerId, sales)
+  // With this one added, if it is the one being recorded now.
+  const withThis = installment.status !== 'bounced' && status === 'bounced'
+    ? { ...bounced, count: bounced.count + 1, total: bounced.total + installment.amount }
+    : bounced
+  const bouncedLine = bouncedNote(withThis)
 
   async function save() {
     if (!entry) return
@@ -93,18 +133,34 @@ export default function SettleDialog({
       setError('Record the date the money arrived - the on-time figure is built on it.')
       return
     }
-    if (status === 'bounced' && !notes.trim()) {
-      setError('Give a reason for the bounce - it is what explains the account’s credit history later.')
+    // Every outcome that isn't money arriving owes an explanation. A bounce
+    // and a cancellation both leave a mark on the account - one on its credit
+    // history, one on what it was ever going to pay - and a year later the
+    // status alone says nothing about either.
+    if (status !== 'collected' && !notes.trim()) {
+      setError(status === 'bounced'
+        ? 'Give a reason for the bounce - it is what explains the account’s credit history later.'
+        : status === 'cancelled'
+          ? 'Give a reason - a written-off receivable with no explanation can’t be defended later.'
+          : 'Say why this hasn’t been collected yet.')
       return
     }
     setBusy(true)
     setError(null)
     try {
       await onSave(sale.id, installment.id, {
-        status,
+        // A bank transfer is money the moment it lands - there is no paper for
+        // Treasury to bank - so recording one settles it outright. Cash and
+        // checks are in the collector's hands and go to Treasury. The
+        // clearing timestamp is deliberately not written here: it is
+        // Treasury's field, and a one-step receipt is dated by its collection.
+        status: status === 'collected' && oneStep ? 'cleared' : status,
         // Cleared when the outcome is no longer "collected", so a corrected
         // mistake doesn't leave a collection date on an uncollected payment.
         collectedAt: status === 'collected' ? new Date(collectedOn).toISOString() : undefined,
+        checkDate: status === 'collected' && sale.paymentMode === 'check' && checkOn
+          ? new Date(checkOn).toISOString()
+          : undefined,
         referenceNo: referenceNo.trim() || undefined,
         notes: notes.trim() || undefined,
         collectorId: collectorId || undefined,
@@ -171,115 +227,182 @@ export default function SettleDialog({
     if (!ok) onNotice('Your browser blocked the print window - allow pop-ups for this site and try again.')
   }
 
+  const money = status === 'collected'
   return (
     <Dialog
       open
       title="Collection"
+      subtitle={`${customer?.company ?? '—'} · ${fmtCurrency(installment.amount)} · due ${fmtDate(installment.dueDate)}`}
       onClose={onClose}
-      width={620}
-      footer={
+      width={860}
+      rail={
         <>
-          <div className="flex-1">
-            <SectionLabel>Amount</SectionLabel>
-            <p className="tnum m-0 mt-[2px] text-[20px] font-semibold">{fmtCurrency(installment.amount)}</p>
-          </div>
-          <GhostButton onClick={onClose}>Cancel</GhostButton>
-          <PrimaryButton onClick={save}>{busy ? 'Saving…' : 'Save'}</PrimaryButton>
+          {/* A receipt, not a commentary: the figures, then one closing line
+              saying what Save does, then the one fact that judges it. The
+              sentences this replaces said the same things in prose and left
+              the reader to find the number inside them. */}
+          <RailSection title="This collection">
+            <RailRow label="Amount" value={fmtCurrency(installment.amount)} />
+            <RailRow label="Due" value={fmtDate(installment.dueDate)} />
+            <RailRow label="Mode" value={label(sale.paymentMode)} />
+            <RailRow label="Collector" value={personnel.find((p) => p.id === collectorId)?.name ?? 'Unassigned'} />
+            <RailClose
+              label="On save"
+              tone={status === 'bounced' ? 'bad' : 'plain'}
+              value={money ? (oneStep ? 'Cleared' : 'In hand') : STATUS_OPTIONS.find((o) => o.value === status)?.label ?? '—'}
+            />
+            {money && late !== null && (
+              <RailRow
+                label="Timing"
+                value={late > 0
+                  ? <span className="font-semibold text-redtext">{late} day{late === 1 ? '' : 's'} late</span>
+                  : <span className="text-greentext">On time</span>}
+              />
+            )}
+            <PaymentPath
+              status={money ? (oneStep ? 'cleared' : 'collected') : status}
+              paymentMode={sale.paymentMode}
+              size="sm"
+              bracket={false}
+              className="mt-[12px]"
+            />
+            {/* One line on what happens next, and only when something does. */}
+            {money && !oneStep && (
+              <RailAside>
+                Treasury banks it next{sale.paymentMode === 'check' && checkOn ? `, from ${fmtDate(checkOn)}` : ''}. Stays on the customer’s balance until it clears.
+              </RailAside>
+            )}
+            {status === 'bounced' && <RailAside tone="bad">Goes on the account’s credit history and the collector’s rate.</RailAside>}
+          </RailSection>
+
+          <RailSection title="Collect from">
+            <p className="m-0 text-[13px] leading-[1.4] text-lab">{collectAddress}</p>
+            <p className="m-0 mt-[2px] font-meta text-[12px] text-mut">{collectPerson} · {collectNumber}</p>
+          </RailSection>
+
+          {bouncedLine && (
+            <RailSection title={withThis.count > bounced.count ? 'With this one' : 'Bounced checks on file'}>
+              <RailRow label="Bounced" value={`${withThis.count} · ${fmtCurrency(withThis.total)}`} />
+              <RailAside tone="bad">{bouncedLine}</RailAside>
+            </RailSection>
+          )}
         </>
       }
+      footer={readOnly ? (
+        <PrimaryButton onClick={onClose}>Close</PrimaryButton>
+      ) : (
+        <>
+          <GhostButton onClick={onClose}>Cancel</GhostButton>
+          <PrimaryButton onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</PrimaryButton>
+        </>
+      )}
     >
+      <fieldset disabled={readOnly} className="contents [&:disabled_*]:cursor-default">
+      {readOnly && (
+        <p className="mb-4 rounded-[6px] border border-line bg-paper px-3 py-2 font-meta text-[12px] text-mut">
+          Viewing only. Recording a collection is Collect’s work; banking it is done from Treasury.
+        </p>
+      )}
       {error && (
-        <p className="mb-3 rounded-[6px] border border-redf bg-redbadge px-3 py-2 text-[13px] font-semibold text-redtext">{error}</p>
+        <p className="mb-4 rounded-[8px] border border-redf bg-redbadge px-3 py-2 font-meta text-[12px] font-semibold text-redtext">{error}</p>
       )}
 
-      <p className="mb-4 text-[13px] text-mut">
-        <b>{customer?.company ?? '—'}</b> · due {fmtDate(installment.dueDate)} · {label(sale.paymentMode)}
-      </p>
+      <Step n={1} title="Outcome">
+        <Choices>
+          {STATUS_OPTIONS.map((o) => (
+            <ChoiceCard
+              key={o.value}
+              on={status === o.value}
+              onClick={() => setStatus(o.value)}
+              title={o.label}
+              note={o.hint}
+              tone={o.tone}
+            />
+          ))}
+        </Choices>
+      </Step>
 
-      <FormSection first>Outcome</FormSection>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-[14px]">
-        <Field label="Status" span2 hint={chosen?.hint}>
-          <Select value={status} onChange={(e) => setStatus(e.target.value as CollectionStatus)}>
-            {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </Select>
-        </Field>
-        {status === 'collected' && (
+      {/* The paper trail, in one block: when the money arrived, what it came
+          on, where it landed, and who carried it. A bank account only makes
+          sense when something was actually received. */}
+      <Step n={2} title={money ? 'Payment details' : 'Collection details'}>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-[14px]">
+          {money && (
+            <Field label="Date collected">
+              <Input type="date" value={collectedOn} onChange={(e) => setCollectedOn(e.target.value)} />
+            </Field>
+          )}
+          {/* The client's question - "due for collection or due for
+              depositing?" - is two dates, and this is the second one. Taking a
+              post-dated check today does not make it bankable today, and the
+              treasury's queue is ordered by this, not by the date above. */}
+          {money && sale.paymentMode === 'check' && (
+            <Field label="Date on the check" hint="When Treasury may bank it.">
+              <Input type="date" value={checkOn} onChange={(e) => setCheckOn(e.target.value)} />
+            </Field>
+          )}
           <Field
-            label="Date collected"
-            hint={
-              preview === null ? undefined
-                : preview > 0 ? `${preview} day${preview === 1 ? '' : 's'} past due - counts as late.`
-                : 'On time.'
-            }
+            label={sale.paymentMode === 'check' ? 'Check number' : 'Reference number'}
+            optional={!money}
+            hint={money ? undefined : 'The check or deposit slip this was meant to settle with.'}
           >
-            <Input type="date" value={collectedOn} onChange={(e) => setCollectedOn(e.target.value)} />
+            <Input value={referenceNo} onChange={(e) => setReferenceNo(e.target.value)} placeholder="e.g. BPI-DS-887214" />
           </Field>
-        )}
-        <Field
-          label="Reference number"
-          hint="Check number, or the deposit slip reference."
-          span2={status !== 'collected'}
-        >
-          <Input value={referenceNo} onChange={(e) => setReferenceNo(e.target.value)} placeholder="e.g. BPI-DS-887214" />
-        </Field>
-      </div>
+          {money && (
+            <Field label="Receiving bank account" optional>
+              <Select value={bankAccountId} onChange={(e) => setBankAccountId(e.target.value)}>
+                <option value="">—</option>
+                {bankAccounts.map((b) => (
+                  <option key={b.id} value={b.id}>{b.bankName} {b.accountNumberMasked}</option>
+                ))}
+              </Select>
+            </Field>
+          )}
+          <Field label="Person in charge">
+            <Select value={collectorId} onChange={(e) => setCollectorId(e.target.value)}>
+              <option value="">Unassigned</option>
+              {personnel.filter((p) => p.active !== false).map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </Select>
+          </Field>
+        </div>
+      </Step>
 
-      <FormSection>Who &amp; where</FormSection>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-[14px]">
-        <Field label="Person in charge">
-          <Select value={collectorId} onChange={(e) => setCollectorId(e.target.value)}>
-            <option value="">Unassigned</option>
-            {personnel.filter((p) => p.active !== false).map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </Select>
-        </Field>
-        <Field label="Receiving bank account">
-          <Select value={bankAccountId} onChange={(e) => setBankAccountId(e.target.value)}>
-            <option value="">—</option>
-            {bankAccounts.map((b) => (
-              <option key={b.id} value={b.id}>{b.bankName} {b.accountNumberMasked}</option>
-            ))}
-          </Select>
-        </Field>
-      </div>
-      <div className="mt-2 rounded-[10px] border border-fill2 px-3 py-2 text-[13px]">
-        <p className="m-0 text-[11px] font-semibold uppercase tracking-wide text-faint">Collect from</p>
-        <p className="m-0">{collectAddress}</p>
-        <p className="m-0 text-mut">{collectPerson} · {collectNumber}</p>
-      </div>
-
-      <FormSection>Notes</FormSection>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-[14px]">
+      <Step n={3} title={money ? 'Notes' : 'Reason'} last>
         <Field
-          label={status === 'collected' ? 'Notes' : 'Reason'}
-          span2
-          hint="Exhibit A asks for the reason behind every late or missed collection."
+          label={money ? 'Notes' : 'Reason'}
+          hideLabel
+          hint={money
+            ? 'Optional - anything worth knowing about this payment.'
+            : 'Exhibit A asks for the reason behind every late or missed collection.'}
         >
           <Input
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            placeholder={status === 'bounced' ? 'e.g. Insufficient funds - client re-issuing' : 'e.g. Cheque signatory out of office until Friday'}
+            placeholder={
+              status === 'bounced' ? 'e.g. Insufficient funds - client re-issuing'
+                : status === 'cancelled' ? 'e.g. Written off after the account closed'
+                : money ? 'e.g. Paid in two tranches, second one cleared today'
+                : 'e.g. Cheque signatory out of office until Friday'
+            }
           />
         </Field>
-      </div>
 
-      <FormSection>Collection form</FormSection>
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={printForm}
-          disabled={busy}
-          className="cursor-pointer rounded-[8px] border border-inputline bg-white px-3 py-[7px] text-[12px] font-semibold text-tealbtn hover:bg-fill2 disabled:opacity-50"
-        >
-          {busy ? 'Working…' : formNo ? 'Reprint form' : 'Print collection form'}
-        </button>
-        {formNo && <span className="text-[12px] text-faint">Form {formNo}</span>}
-      </div>
-
-      <div className="mt-3">
-        <DocumentUpload tbl="sales" recordId={sale.id} slots={['depositSlip', 'checkImage', 'collectionForm']} />
-      </div>
+        {/* The paperwork, at the foot: the form that goes out with the
+            collector, and the slips that come back. */}
+        <div className="mt-[14px] flex items-center gap-3">
+          <GhostButton onClick={printForm} disabled={busy} size="sm" className="gap-[6px]">
+            <Printer size={13} strokeWidth={2} />
+            {busy ? 'Working…' : formNo ? 'Reprint collection form' : 'Print collection form'}
+          </GhostButton>
+          {formNo && <span className="font-meta text-[12px] text-faint">Form {formNo}</span>}
+        </div>
+        <div className="mt-[10px]">
+          <DocumentUpload tbl="sales" recordId={sale.id} slots={['depositSlip', 'checkImage', 'collectionForm']} />
+        </div>
+      </Step>
+      </fieldset>
     </Dialog>
   )
 }

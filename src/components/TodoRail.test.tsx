@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import TodoRail from './TodoRail'
 import { repos } from '../data/repo'
@@ -19,14 +19,19 @@ const todo = (over: Partial<Todo>): Todo => ({
 } as Todo)
 
 let TODOS: Todo[] = []
+const SEATS = [
+  { id: 'seat1', name: 'Ramon', role: 'Encoder' },
+  { id: 'seat2', name: 'Dina Cruz', role: 'Dispatcher' },
+]
 
+let ME: Record<string, unknown> = { id: 'seat1', name: 'Ramon', isAdmin: false, modules: ['inventory'] }
 vi.mock('../lib/auth', () => ({
-  useAuth: () => ({ seat: { id: 'seat1', name: 'Ramon', isAdmin: false, modules: ['inventory'] } }),
+  useAuth: () => ({ seat: ME }),
 }))
 vi.mock('../lib/deepLink', () => ({ recordHref: () => null }))
 vi.mock('../lib/data', () => ({
   useTables: (keys: readonly string[]) =>
-    Object.fromEntries(keys.map((k) => [k, k === 'todos' ? TODOS : []])),
+    Object.fromEntries(keys.map((k) => [k, k === 'todos' ? TODOS : k === 'seats' ? SEATS : []])),
 }))
 vi.mock('../data/repo', () => ({
   repos: { todos: { add: vi.fn(), update: vi.fn(), remove: vi.fn() } },
@@ -36,23 +41,27 @@ beforeEach(() => {
   vi.setSystemTime(new Date(`${TODAY}T09:00:00.000Z`))
   vi.clearAllMocks()
   TODOS = []
+  ME = { id: 'seat1', name: 'Ramon', isAdmin: false, modules: ['inventory'] }
 })
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
 const renderRail = () => render(<MemoryRouter><TodoRail /></MemoryRouter>)
 /** Adding is behind a dialog now, matching the announcement board. */
 const openCompose = () => fireEvent.click(screen.getByLabelText(/new to-do/i))
-const addField = () => screen.getByPlaceholderText(/something to remember/i)
+const addField = () => screen.getByPlaceholderText(/what needs doing/i)
 const newDateField = () => screen.getByLabelText(/due date for the new to-do/i) as HTMLInputElement
 
 describe('TodoRail dates', () => {
-  it('keeps the add form out of the rail until asked for', () => {
-    // The rail is 280px wide and most visits are to read or tick something off,
-    // so the form is not worth permanent room at the top.
+  /** The quick bar adds a plain item on Enter; the full form is behind the expand. */
+  it('adds a plain item from the composer bar on Enter', () => {
     renderRail()
-    expect(screen.queryByPlaceholderText(/something to remember/i)).toBeNull()
+    expect(screen.queryByPlaceholderText(/what needs doing/i)).toBeNull()
+    const bar = screen.getByLabelText('Add a to-do')
+    fireEvent.change(bar, { target: { value: 'Ring the depot' } })
+    fireEvent.keyDown(bar, { key: 'Enter' })
+    expect(repos.todos.add).toHaveBeenCalledWith(expect.objectContaining({ text: 'Ring the depot', seatId: 'seat1' }))
     openCompose()
-    expect(screen.getByPlaceholderText(/something to remember/i)).toBeTruthy()
+    expect(screen.getByPlaceholderText(/what needs doing/i)).toBeTruthy()
   })
 
   it('files a new item against any date, not just the shortcuts', () => {
@@ -81,6 +90,8 @@ describe('TodoRail dates', () => {
     openCompose()
     fireEvent.click(screen.getByRole('button', { name: 'Tomorrow' }))
     expect(newDateField().value).toBe('2026-08-26')
+    fireEvent.click(screen.getByRole('button', { name: 'No date' }))
+    expect(newDateField().value).toBe('')
   })
 
   it('changes the date on an item that already exists', () => {
@@ -117,5 +128,53 @@ describe('TodoRail dates', () => {
     expect(screen.getByText(/Overdue · 1/)).toBeTruthy()
     expect(screen.getByText(/Today · 1/)).toBeTruthy()
     expect(screen.getByText(/No date · 1/)).toBeTruthy()
+  })
+
+  /**
+   * Assignment is for administrators and approvers only; everyone else keeps
+   * a private list with no picker at all.
+   */
+  it('offers an assignee picker only to seats that may assign', () => {
+    renderRail()
+    openCompose()
+    expect(screen.queryByLabelText('For')).toBeNull()
+    cleanup()
+    ME = { ...ME, canApprove: true }
+    renderRail()
+    openCompose()
+    fireEvent.click(screen.getByRole('radio', { name: /Dina Cruz/ }))
+    fireEvent.change(addField(), { target: { value: 'Book the Bulacan run' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Assign to Dina Cruz' }))
+    expect(repos.todos.add).toHaveBeenCalledWith(expect.objectContaining({ seatId: 'seat2', text: 'Book the Bulacan run' }))
+  })
+
+  /** An item on my list from a manager says so; one I put on theirs sits apart. */
+  it('shows who assigned an item, and lists what I assigned to others', () => {
+    TODOS = [
+      todo({ id: 'a', text: 'Call Cielo', assignedById: 'seat2', assignedByName: 'Dina Cruz' }),
+      todo({ id: 'b', seatId: 'seat2', text: 'Weigh the tankers', assignedById: 'seat1', assignedByName: 'Ramon' }),
+    ]
+    renderRail()
+    expect(screen.getByText('from Dina Cruz')).toBeTruthy()
+    expect(screen.getByText(/Assigned to others · 1 open/)).toBeTruthy()
+    expect(screen.getByText('for Dina Cruz')).toBeTruthy()
+  })
+
+  /** An item can be reworded and re-dated after the fact, in the same dialog
+   *  that made it - with "For" absent, since the server will not move it. */
+  it('edits an item’s words and date in place', async () => {
+    ME = { id: 'seat1', name: 'Ramon', isAdmin: true, modules: ['inventory'] }
+    TODOS = [todo({ id: 'a', text: 'Call Cielo', dueDate: '2026-08-25T00:00:00.000Z' })]
+    renderRail()
+    fireEvent.click(screen.getByRole('button', { name: 'Edit "Call Cielo"' }))
+    expect(screen.getByRole('dialog', { name: 'Edit to-do' })).toBeTruthy()
+    expect(screen.queryByRole('radiogroup', { name: 'For' })).toBeNull()
+    const field = screen.getByLabelText('What needs doing') as HTMLInputElement
+    expect(field.value).toBe('Call Cielo')
+    fireEvent.change(field, { target: { value: 'Call Cielo about the PO' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Tomorrow' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(repos.todos.update).toHaveBeenCalledWith('a', { text: 'Call Cielo about the PO', dueDate: new Date('2026-08-26').toISOString() }))
+    expect(repos.todos.add).not.toHaveBeenCalled()
   })
 })

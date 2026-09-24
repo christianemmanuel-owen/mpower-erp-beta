@@ -3,7 +3,7 @@ import {
   agentStats, agingBucketOf, collectorWorkload, customerStats, flowSeries, inRange,
   installmentBankAccount, installmentCollector, isInstallmentOverdue, openReceivables,
   outstandingByCustomer, recentActivity, revenue, stockByWarehouse, stockSeries, supplierStats,
-  volumeIn, volumeOut,
+  stockSaleVolume, volumeIn, volumeOut,
 } from './metrics'
 import type { Agent, Customer, Delivery, Purchase, Sale, SaleInstallment, Supplier, SupplierQuote } from '../data/types'
 
@@ -346,18 +346,26 @@ describe('agingBucketOf', () => {
 })
 
 describe('outstandingByCustomer', () => {
-  it('aggregates open installments per customer with aging and next due', () => {
+  /**
+   * A collected check is still owed until it clears - the bank can refuse it -
+   * so it stays on the balance as money in flight. It is not late, though, so
+   * it sits in no ageing bucket and does not move the next due date.
+   */
+  it('aggregates what each customer owes, ageing only what is still to collect', () => {
     const sales = [
       sale({ id: 's1', customerId: 'c1', collectorId: 'p1', installments: [
         inst({ id: 'a', amount: 500, dueDate: '2026-08-01' }), // current
         inst({ id: 'b', amount: 300, dueDate: '2026-07-01' }), // 20 days overdue
-        inst({ id: 'c', amount: 999, dueDate: '2026-01-01', status: 'collected' }), // ignored
+        inst({ id: 'c', amount: 999, dueDate: '2026-01-01', status: 'collected' }), // in hand: owed, not late
+        inst({ id: 'e', amount: 111, dueDate: '2026-01-01', status: 'cleared' }), // paid: gone
       ] }),
       sale({ id: 's2', customerId: 'c2', installments: [inst({ id: 'd', amount: 200, dueDate: '2026-03-01', collectorId: 'p2' })] }),
     ]
     const [c1, c2] = outstandingByCustomer(sales, TODAY)
     expect(c1.customerId).toBe('c1') // biggest outstanding first
-    expect(c1.outstanding).toBe(800)
+    expect(c1.outstanding).toBe(1799)
+    expect(c1.inFlight).toBe(999)
+    expect(c1.openCount).toBe(2)
     expect(c1.overdue).toBe(300)
     expect(c1.aging).toEqual({ 'current': 500, '1-30': 300, '31-60': 0, '61-90': 0, '90+': 0 })
     expect(c1.nextDue).toBe('2026-07-01')
@@ -367,8 +375,9 @@ describe('outstandingByCustomer', () => {
     expect(c2.collectorIds).toEqual(['p2'])
   })
 
-  it('omits customers with nothing open', () => {
-    expect(outstandingByCustomer([sale({ installments: [inst({ status: 'collected' })] })], TODAY)).toEqual([])
+  it('omits customers who owe nothing', () => {
+    expect(outstandingByCustomer([sale({ installments: [inst({ status: 'cleared' })] })], TODAY)).toEqual([])
+    expect(outstandingByCustomer([sale({ installments: [inst({ status: 'cancelled' })] })], TODAY)).toEqual([])
   })
 })
 
@@ -435,11 +444,13 @@ describe('partial returns', () => {
     expect(stat.volume).toBe(0)
   })
 
-  it('still credits an agent when returned fuel was written off rather than restocked', () => {
-    // Nothing came back into the warehouse, so the sale stood - the loss is a
-    // stock question, not a quota one.
+  it('credits nothing for a return whose fuel never came back - the sale is still reversed', () => {
+    // Net sales are sales less returns, whatever happened to the fuel. The
+    // litres that never came back are a stock loss, and stockSaleVolume still
+    // has them out of the tank; the agent's quota does not keep them.
     const [stat] = agentStats([agent], [writtenOff], range)
-    expect(stat.volume).toBe(5_000)
+    expect(stat.volume).toBe(0)
+    expect(stockSaleVolume(writtenOff)).toBe(5_000)
   })
 
   it('nets returns out of a customer\'s order volume', () => {

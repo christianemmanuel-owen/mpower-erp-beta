@@ -10,6 +10,9 @@ export const MODULES: { key: ModuleKey; label: string; path: string }[] = [
   { key: 'inventory', label: 'Stock', path: '/inventory' },
   { key: 'sales', label: 'Sales', path: '/sales' },
   { key: 'collection', label: 'Collect', path: '/collection' },
+  // Beside Collect, not inside it: whoever banks the money must be able to be
+  // somebody other than whoever received it.
+  { key: 'treasury', label: 'Treasury', path: '/treasury' },
   { key: 'accounts', label: 'Accounts', path: '/accounts' },
   { key: 'logistics', label: 'Trips', path: '/logistics' },
   { key: 'hr', label: 'HR', path: '/hr' },
@@ -20,10 +23,63 @@ export function canAccess(seat: Seat | null, module: ModuleKey) {
   return !!seat && (seat.isAdmin || seat.modules.includes(module))
 }
 
+/**
+ * A login that is one person doing one job, rather than the office.
+ *
+ * Admins are never field seats whatever the record says - a mistake in the seat
+ * form should not put the owner of the business on a crew screen with no way
+ * back. Mirrors isScoped() in server/scope.ts, which is what actually enforces
+ * what such a seat can read and write.
+ */
+export const isFieldSeat = (seat: Seat | null): boolean =>
+  !!seat && seat.scope === 'own' && !seat.isAdmin
+
+/** The work screens a field seat can have, in the order they land on them. */
+export const FIELD_PAGES = [
+  { path: '/my/trips', label: 'My trips', module: 'logistics' as ModuleKey },
+  { path: '/my/sales', label: 'My sales', module: 'sales' as ModuleKey },
+  // A collector is out of the office with other people's money on them, which
+  // is its own job and its own screen - same as the crew's and the agent's.
+  { path: '/my/collections', label: 'My collections', module: 'collection' as ModuleKey },
+]
+
+/**
+ * The to-do screen every field seat gets alongside its work screen. Not a work
+ * screen itself: it never earns a seat the phone shell on its own, so a seat
+ * with no work screen built for it yet is not shelled into a phone app with
+ * nothing in it but a task list.
+ */
+export const FIELD_TASKS_PAGE = { path: '/my/tasks', label: 'My tasks' }
+
+/** The field pages this seat actually has. Also what the phone shell routes. */
+export const fieldPages = (seat: Seat | null) => {
+  if (!isFieldSeat(seat)) return []
+  const work = FIELD_PAGES.filter((p) => canAccess(seat, p.module))
+  return work.length > 0 ? [...work, FIELD_TASKS_PAGE] : []
+}
+
+/**
+ * Whether this seat gets the stripped phone shell instead of the full app.
+ *
+ * Not every scoped seat does, because not every scoped seat has a screen built
+ * for it yet - crew have My trips, agents My sales, collectors My collections,
+ * and a scoped seat holding some other module has none. Gating the shell on
+ * isFieldSeat alone put such a seat inside a shell that does not route the page
+ * homePath sends it to - so the catch-all redirected there, which matched
+ * nothing, which redirected again, and the router bounced between two paths
+ * forever. Derived from FIELD_PAGES so adding a screen is the only step: a seat
+ * gets the shell exactly when the shell has something to show it.
+ */
+export const hasFieldShell = (seat: Seat | null): boolean => fieldPages(seat).length > 0
+
 /** First module this seat is allowed to see - where logins and blocked URLs land.
  * Null when a (misconfigured) seat has no modules at all. */
 export function homePath(seat: Seat | null): string | null {
   if (!seat) return null
+  // A field seat lands on its own work, not on a dashboard of a business it
+  // cannot see: every card on that page reads tables it has no rows of.
+  const mine = fieldPages(seat)[0]
+  if (mine) return mine.path
   return MODULES.find((m) => canAccess(seat, m.key))?.path ?? null
 }
 

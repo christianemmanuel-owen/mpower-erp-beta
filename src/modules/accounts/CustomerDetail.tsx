@@ -1,9 +1,11 @@
-import { Chip, Dialog, FormSection, GhostButton, InfoTip, PrimaryButton } from '../../components/ui'
+import { Chip, Dialog, FormSection, GhostButton, InfoTip, PrimaryButton, WIDE_DIALOG } from '../../components/ui'
 import { RailAside, RailClose, RailRow, RailSection } from '../../components/SummaryRail'
-import { fmtCompactPeso, fmtCurrency, fmtDate, fmtLiters, fmtTerm, label } from '../../lib/format'
+import { fmtCurrency, fmtDate, fmtLiters, fmtTerm, label } from '../../lib/format'
 import { isInstallmentOverdue, type CustomerStat } from '../../lib/metrics'
 import { accountActivity, creditScore } from '../../lib/credit'
+import { bouncedFor, bouncedNote } from '../../lib/bouncedChecks'
 import { ACCOUNT_OPENING_SLOTS, slotLabel, useAttachments } from '../../lib/attachments'
+import { isSettled, wasCollected } from '../../lib/collectionStatus'
 import type { ContactPoint, Sale } from '../../data/types'
 
 const pct = (v: number | null) => (v === null ? '—' : `${Math.round(v * 100)}%`)
@@ -13,11 +15,18 @@ const pct = (v: number | null) => (v === null ? '—' : `${Math.round(v * 100)}%
  * into one misleading chip. */
 function installmentBadge(installments: Sale['installments']) {
   const total = installments.length
-  const collected = installments.filter((i) => i.status === 'collected').length
+  // Paid means cleared. A check in hand or at the bank is neither paid nor
+  // still to be collected, so a plan with one of those reads as in flight
+  // rather than flattening to either.
+  const paid = installments.filter((i) => isSettled(i.status)).length
+  const inFlight = installments.filter((i) => wasCollected(i.status) && !isSettled(i.status)).length
   const allCancelled = total > 0 && installments.every((i) => i.status === 'cancelled')
-  const allCollected = total > 0 && collected === total
-  const statusKey = allCancelled ? 'cancelled' : allCollected ? 'collected' : 'pending'
-  const text = total > 1 && !allCancelled && !allCollected ? `${collected}/${total} collected` : label(statusKey)
+  const allPaid = total > 0 && paid === total
+  const statusKey = allCancelled ? 'cancelled' : allPaid ? 'cleared' : inFlight > 0 && paid + inFlight === total ? 'deposited' : 'pending'
+  const text = allCancelled ? label('cancelled')
+    : allPaid ? label('cleared')
+      : total > 1 ? `${paid}/${total} cleared${inFlight ? ` · ${inFlight} in flight` : ''}`
+        : inFlight ? 'In flight' : label('pending')
   return { statusKey, text, anyOverdue: installments.some((i) => isInstallmentOverdue(i)) }
 }
 
@@ -95,6 +104,8 @@ export default function CustomerDetail({ stat, sales, onClose, onEdit, inRangeFn
     .slice(0, 6)
 
   const activity = accountActivity(c.id, sales, inRangeFn ?? (() => true))
+  const bounced = bouncedFor(c.id, sales)
+  const bouncedLine = bouncedNote(bounced)
   const score = creditScore(c, stat.history)
   const filed = new Set((docs.data ?? []).map((d) => d.slot))
   const missing = ACCOUNT_OPENING_SLOTS.filter((slot) => !filed.has(slot))
@@ -113,7 +124,7 @@ export default function CustomerDetail({ stat, sales, onClose, onEdit, inRangeFn
       ].filter(Boolean).join(' · ')}
       aside={stat.rating ? <Chip status={stat.rating} text={`Credit: ${stat.rating}`} /> : undefined}
       onClose={onClose}
-      width={1000}
+      width={WIDE_DIALOG}
       /**
        * How the account stands, beside what it has done.
        *
@@ -134,6 +145,7 @@ export default function CustomerDetail({ stat, sales, onClose, onEdit, inRangeFn
             />
             <RailRow label="Payments settled" value={stat.history.settled} />
             <RailRow label="Bounced payments" value={stat.history.bounced || 'None'} />
+            {bounced.count > 0 && <RailRow label="Bounced total" value={fmtCurrency(bounced.total)} />}
             <RailClose
               label="Credit score"
               value={score.value !== null ? score.value : 'Not set'}
@@ -142,13 +154,16 @@ export default function CustomerDetail({ stat, sales, onClose, onEdit, inRangeFn
               <span className="font-meta text-[12px] text-faint">Set by hand</span>
               <InfoTip label="How the credit score is derived">{score.explanation}</InfoTip>
             </span>
+            {/* What the bounced checks add up to in law, so the decision to
+                take another one is made knowing it. */}
+            {bouncedLine && <RailAside tone="bad">{bouncedLine}</RailAside>}
           </RailSection>
 
           <RailSection title="Owed now">
             {stat.overdueCount > 0 ? (
               <>
                 <RailRow label="Overdue installments" value={stat.overdueCount} />
-                <RailClose label="Overdue amount" tone="bad" value={fmtCompactPeso(stat.overdueAmount)} />
+                <RailClose label="Overdue amount" tone="bad" value={fmtCurrency(stat.overdueAmount)} />
               </>
             ) : (
               <RailAside>Nothing overdue.</RailAside>

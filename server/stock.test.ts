@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { netSaleVolume, receivedVolume, restockedVolume, stockFrom } from './stock'
+import { stockSaleVolume, receivedVolume, restockedVolume, stockFrom } from './stock'
 
 /**
  * These cases are duplicated verbatim in src/lib/stockRules.test.ts, which runs
@@ -44,6 +44,16 @@ export const SALE_CASES: { name: string; sale: Record<string, unknown>; expected
     sale: { status: 'returned', volumeLiters: 1000, resolution: { treatment: 'restocked', volumeReturned: 5000 } },
     expected: 0,
   },
+  {
+    name: 'refunded return whose fuel came back (new records) consumes nothing',
+    sale: { status: 'returned', volumeLiters: 1000, resolution: { treatment: 'refunded', backToStock: true } },
+    expected: 0,
+  },
+  {
+    name: 'return whose fuel did not come back is still out of the tank',
+    sale: { status: 'returned', volumeLiters: 1000, resolution: { treatment: 'credit_note', backToStock: false, volumeReturned: 400 } },
+    expected: 1000,
+  },
 ]
 
 export const PURCHASE_CASES: { name: string; purchase: Record<string, unknown>; expected: number }[] = [
@@ -54,8 +64,8 @@ export const PURCHASE_CASES: { name: string; purchase: Record<string, unknown>; 
 ]
 
 describe('server stock rules', () => {
-  it.each(SALE_CASES)('netSaleVolume: $name', ({ sale, expected }) => {
-    expect(netSaleVolume(sale)).toBe(expected)
+  it.each(SALE_CASES)('stockSaleVolume: $name', ({ sale, expected }) => {
+    expect(stockSaleVolume(sale)).toBe(expected)
   })
 
   it.each(PURCHASE_CASES)('receivedVolume: $name', ({ purchase, expected }) => {

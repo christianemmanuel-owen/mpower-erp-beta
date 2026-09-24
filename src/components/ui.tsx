@@ -1,10 +1,11 @@
 import {
-  Children, cloneElement, isValidElement, useEffect, useId, useRef, useState,
+  Children, cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState,
   type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
 } from 'react'
 import { usePaged } from '../lib/paging'
-import { X } from 'lucide-react'
+import { Check, ChevronRight, CircleX, PackageX, Pencil, RotateCcw, Trash2, X, type LucideIcon } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import type { ReactElement } from 'react'
 import type { SortState } from '../lib/sort'
@@ -30,6 +31,8 @@ const chipTone: Record<string, Tone> = {
   // Watch it - in flight, or waiting on someone.
   ordered: 'watch',
   pending: 'watch',
+  // Banked, not yet money - waiting on the bank is waiting on someone.
+  deposited: 'watch',
   loading: 'watch',
   returned: 'watch',
   half_day: 'watch',
@@ -70,7 +73,7 @@ export function Card({ children, className, delay }: { children: ReactNode; clas
   // is noise. See the `.rise` no-op in index.css.
   void delay
   return (
-    <div className={`overflow-hidden rounded-[8px] border border-line bg-white ${className ?? ''}`}>
+    <div className={`fade-only overflow-hidden rounded-[8px] border border-line bg-white ${className ?? ''}`}>
       {children}
     </div>
   )
@@ -91,7 +94,18 @@ export function Gauge({ pct, color, height = 5, delay = 150 }: { pct: number; co
  * This used to be an ink-coloured strip, which made it the loudest object on a
  * screen full of numbers that matter more. Same props, so no caller changed.
  */
-export function KpiStrip({ items, delay }: { items: { label: ReactNode; value: ReactNode; sub?: ReactNode }[]; delay?: number }) {
+export function KpiStrip({ items, delay }: {
+  items: {
+    label: ReactNode
+    value: ReactNode
+    sub?: ReactNode
+    /** Where the figure comes from; the cell becomes a link there. */
+    to?: string
+    /** What the figure counts, as a tip in the cell's top-right corner. */
+    tip?: { label: string; body: ReactNode }
+  }[]
+  delay?: number
+}) {
   void delay
   return (
     // Wraps rather than squeezes. Six KPIs in a narrow column gave each cell
@@ -101,16 +115,40 @@ export function KpiStrip({ items, delay }: { items: { label: ReactNode; value: R
     // are hairline gaps over a ruled ground rather than a left border per cell,
     // because a left border on the first cell of a second row is a stray line.
     <div
-      className="tnum grid gap-px overflow-hidden rounded-[8px] border border-line bg-linesoft"
+      className="tnum fade-only grid gap-px overflow-hidden rounded-[8px] border border-line bg-linesoft"
       style={{ gridTemplateColumns: `repeat(auto-fit, minmax(150px, 1fr))` }}
     >
-      {items.map((item, i) => (
-        <div key={i} className="min-w-0 bg-white px-4 py-3">
-          <p className="m-0 font-meta text-[10px] font-semibold uppercase tracking-[.09em] text-faint">{item.label}</p>
-          <p className="m-0 mt-[5px] text-[20px] font-semibold leading-[1.2] tracking-[-0.02em]">{item.value}</p>
-          {item.sub && <p className="m-0 mt-[3px] font-meta text-[12px] text-mut">{item.sub}</p>}
-        </div>
-      ))}
+      {items.map((item, i) => {
+        const body = (
+          <>
+            <p className="m-0 flex items-center gap-[5px] font-meta text-[10px] font-semibold uppercase tracking-[.09em] text-faint">
+              <span className="min-w-0 truncate">{item.label}</span>
+              <span className="ml-auto flex shrink-0 items-center gap-[4px]">
+                {item.to && <ChevronRight size={11} strokeWidth={2.2} className="text-faint opacity-0 transition-opacity group-hover:opacity-100" />}
+                {item.tip && (
+                  // Stops the click reaching the cell's link: opening the note
+                  // should not also open the module.
+                  <span onClick={(e) => { e.preventDefault(); e.stopPropagation() }}>
+                    <InfoTip label={item.tip.label}>{item.tip.body}</InfoTip>
+                  </span>
+                )}
+              </span>
+            </p>
+            <p className="m-0 mt-[5px] text-[20px] font-semibold leading-[1.2] tracking-[-0.02em]">{item.value}</p>
+            {item.sub && <p className="m-0 mt-[3px] font-meta text-[12px] text-mut">{item.sub}</p>}
+          </>
+        )
+        // A figure that comes from a module opens that module. Drawn as the
+        // same cell, with a chevron on hover, rather than as a separate "Open"
+        // control beside a number that already says where it is from.
+        return item.to ? (
+          <Link key={i} to={item.to} className="group min-w-0 bg-white px-4 py-3 text-inherit no-underline transition-colors hover:bg-paper">
+            {body}
+          </Link>
+        ) : (
+          <div key={i} className="min-w-0 bg-white px-4 py-3">{body}</div>
+        )
+      })}
     </div>
   )
 }
@@ -140,12 +178,27 @@ export interface DialogStep {
   content: ReactNode
 }
 
-export function Dialog({ open, title, subtitle, aside, rail, nav, onClose, children, steps, footer, width = 640 }: {
+/**
+ * The width of a three-panel dialog - nav, form, rail.
+ *
+ * One number rather than a value per caller, so the seat, role, customer,
+ * employee, sale, purchase and approval editors are the same size on screen
+ * and open in the same place. 1160 leaves the middle column about 650px once
+ * the nav (176) and rail (296) have theirs, which is enough for the
+ * installment plan to sit on one line, and still clears a 1280px display with
+ * the 24px page gutter on each side.
+ */
+export const WIDE_DIALOG = 1160
+
+export function Dialog({ open, title, subtitle, aside, rail, nav, onClose, children, steps, footer, width = 640, flush = false }: {
   open: boolean
   title: string
   /** The specifics, under the title. The title says what this is; this says
    * which one. */
   subtitle?: ReactNode
+  /** No body padding and no body scroll: the children fill the panel and
+   *  manage their own scrolling - a map beside a list, say. */
+  flush?: boolean
   /**
    * Provenance, on the right of the header - who and when, typically.
    *
@@ -199,7 +252,7 @@ export function Dialog({ open, title, subtitle, aside, rail, nav, onClose, child
    * already on its way. Short dialogs - a confirm, a two-field form - still fit
    * themselves, because a 700px-tall box around two fields is its own problem.
    */
-  const steady = Boolean(nav || steps)
+  const steady = Boolean(nav || steps || flush)
 
   /**
    * Held in a ref so the setup effect below can depend on `open` alone.
@@ -279,13 +332,13 @@ export function Dialog({ open, title, subtitle, aside, rail, nav, onClose, child
   // clipped to that ancestor's box instead of covering - and centering in - the whole screen.
   return createPortal(
     <div className="fixed inset-0 z-[1200] flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-ink/40" onClick={onClose} />
+      <div className="dlg-veil absolute inset-0 bg-ink/40" onClick={onClose} />
       <div
         ref={panel}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={`relative flex ${steady ? 'h-[85vh]' : 'max-h-[85vh]'} w-full flex-col rounded-[8px] border border-line bg-white shadow-[0_20px_60px_rgba(20,24,27,.22)]`}
+        className={`dlg-panel relative flex ${flush ? 'h-[min(85vh,680px)]' : steady ? 'h-[85vh]' : 'max-h-[85vh]'} w-full flex-col rounded-[8px] border border-line bg-white shadow-[0_20px_60px_rgba(20,24,27,.22)]`}
         style={{ maxWidth: width, animation: 'popIn .16s ease both' }}
       >
         <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-[13px]">
@@ -342,7 +395,7 @@ export function Dialog({ open, title, subtitle, aside, rail, nav, onClose, child
           )}
           {/* Named so FormNav can find the scroll container it has to measure
               against - the sections scroll inside this, not inside the page. */}
-          <div data-dialog-body className="min-w-0 flex-1 overflow-y-auto px-5 py-[18px]">
+          <div data-dialog-body className={`min-w-0 flex-1 ${flush ? 'flex overflow-hidden' : 'overflow-y-auto px-5 py-[18px]'}`}>
             {children}
             {steps?.[step]?.content}
           </div>
@@ -542,11 +595,22 @@ export function FormSection({ children, first, id, right }: {
  * control gets an id and `htmlFor`, and anything else is a labelled group. The
  * footgun is gone rather than documented.
  */
-export function Field({ label, children, span2, hint, error }: {
+export function Field({ label, children, span2, hint, error, optional, hideLabel }: {
   label: string
   children: ReactNode
   span2?: boolean
   hint?: string
+  /**
+   * Keep the label for screen readers but don't draw it.
+   *
+   * For the single-control section whose heading already IS the label - a step
+   * titled "Reason" holding one reason box. Printing the word twice, once as a
+   * heading and again five pixels below it, reads as a mistake.
+   */
+  hideLabel?: boolean
+  /** Says "optional" at the label's right end, so the blanks that may stay
+   *  blank are told apart from the ones that may not. */
+  optional?: boolean
   /**
    * What is wrong with this field, said here rather than in a banner.
    *
@@ -587,18 +651,27 @@ export function Field({ label, children, span2, hint, error }: {
           value inside the control and heavier than it, so a filled form read as
           a list of labels with data attached rather than the other way round. */}
       {single ? (
-        <label htmlFor={single.props.id ?? id} className="mb-[5px] block font-meta text-[12px] font-semibold text-mut">{label}</label>
+        <label htmlFor={single.props.id ?? id} className={hideLabel ? 'sr-only' : LABEL}>
+          {label}{!hideLabel && optional && <Optional />}
+        </label>
       ) : (
-        <span id={`${id}-label`} className="mb-[5px] block font-meta text-[12px] font-semibold text-mut">{label}</span>
+        <span id={`${id}-label`} className={hideLabel ? 'sr-only' : LABEL}>
+          {label}{!hideLabel && optional && <Optional />}
+        </span>
       )}
       <div className={error ? '[&_input]:border-redf [&_select]:border-redf [&_textarea]:border-redf' : ''}>
         {single ? labelled : <div role="group" aria-labelledby={`${id}-label`}>{children}</div>}
       </div>
       {error && <span id={errId} className="mt-1 block font-meta text-[12px] font-semibold text-redtext">{error}</span>}
-      {hint && !error && <span id={hintId} className="mt-1 block font-meta text-[12px] text-faint">{hint}</span>}
+      {hint && !error && <span id={hintId} className="mt-1 block font-meta text-[12px] text-mut">{hint}</span>}
     </div>
   )
 }
+
+// The label reads as the field's name, so it is a shade darker than a hint
+// and lighter than the value inside the control.
+const LABEL = 'mb-[5px] flex items-baseline justify-between font-meta text-[12px] font-semibold text-lab'
+const Optional = () => <span className="font-normal text-faint">optional</span>
 
 /**
  * The compact control used in a card header to filter the table below it.
@@ -756,28 +829,49 @@ export function Meter({ value, max, tone = 'accent', className = '' }: {
   )
 }
 
-export function TabBar<T extends string>({ tabs, active, onChange, labels }: {
+export function TabBar<T extends string>({ tabs, active, onChange, labels, counts }: {
   tabs: readonly T[]
   active: T
   onChange: (tab: T) => void
   /** Display text, where the tab key is not what should be shown. */
   labels?: Partial<Record<T, string>>
+  /** A number after the label - how many are on that tab. */
+  counts?: Partial<Record<T, number>>
 }) {
+  // The raised segment is one element that slides to the chosen tab rather
+  // than a background each button paints for itself, so switching moves it
+  // across - the way the page itself fades in - instead of blinking.
+  const track = useRef<HTMLSpanElement>(null)
+  const [thumb, setThumb] = useState<{ left: number; width: number } | null>(null)
+  useLayoutEffect(() => {
+    const el = Array.from(track.current?.querySelectorAll<HTMLButtonElement>('[data-tab]') ?? []).find((b) => b.dataset.tab === active)
+    if (!el) return
+    setThumb({ left: el.offsetLeft, width: el.offsetWidth })
+  }, [active, tabs, labels, counts])
   return (
-    <span className="flex w-fit gap-[2px] rounded-[6px] bg-fill2 p-[2px]">
+    <span ref={track} className="relative flex w-fit gap-[2px] rounded-[6px] bg-fill2 p-[2px]">
+      {thumb && (
+        <span
+          aria-hidden
+          className="absolute top-[2px] bottom-[2px] rounded-[4px] bg-white shadow-[0_1px_2px_rgba(20,24,27,.05)] transition-[left,width] duration-200 ease-out motion-reduce:transition-none"
+          style={{ left: thumb.left, width: thumb.width }}
+        />
+      )}
       {tabs.map((t) => (
         <button
           key={t}
           type="button"
+          data-tab={t}
           onClick={() => onChange(t)}
           aria-current={t === active ? 'page' : undefined}
-          className={`cursor-pointer whitespace-nowrap rounded-[4px] border-0 px-[11px] py-[4px] font-meta text-[12px] capitalize transition-colors ${
-            t === active
-              ? 'bg-white font-semibold text-ink shadow-[0_1px_2px_rgba(20,24,27,.05)]'
-              : 'bg-transparent text-mut hover:text-ink'
+          className={`relative cursor-pointer whitespace-nowrap rounded-[4px] border-0 bg-transparent px-[11px] py-[4px] font-meta text-[12px] capitalize transition-colors ${
+            t === active ? 'font-semibold text-ink' : 'text-mut hover:text-ink'
           }`}
         >
           {labels?.[t] ?? t}
+          {counts?.[t] !== undefined && (
+            <span className={`tnum ml-[5px] text-[11px] font-semibold ${t === active ? 'text-mut' : 'text-faint'}`}>{counts[t]}</span>
+          )}
         </button>
       ))}
     </span>
@@ -798,7 +892,7 @@ export function TabBar<T extends string>({ tabs, active, onChange, labels }: {
  * MD is the form scale: inputs, selects, and the buttons in a dialog footer.
  */
 const SM = 'inline-flex h-[28px] items-center justify-center rounded-[6px] px-[10px] font-meta text-[12px] font-semibold'
-const MD = 'inline-flex h-[34px] items-center justify-center rounded-[6px] px-[13px] font-meta text-[12px] font-semibold'
+const MD = 'inline-flex h-[36px] items-center justify-center rounded-[8px] px-[13px] font-meta text-[12px] font-semibold'
 
 /** `ctl` is not decoration - see `select.ctl` in index.css, which is what
  *  replaces the browser's own dropdown arrow. */
@@ -809,11 +903,11 @@ export const filterCls =
  * `w-full` here is why a caller wanting a fixed width has to write `!w-[104px]`
  * rather than `w-[104px]`: the two utilities tie on specificity and the loser is
  * decided by their order in the sheet, not by the order in the className. Same
- * for the 34px height. It is a footgun, and the alternative - dropping w-full
+ * for the 36px height. It is a footgun, and the alternative - dropping w-full
  * and having Field stretch its control - would silently shrink the several
  * dozen controls that live outside a Field and rely on it.
  */
-const controlCls = 'ctl box-border h-[34px] w-full rounded-[6px] border border-inputline bg-white px-[11px] font-[inherit] text-[13px] focus:border-teal focus:outline-none'
+const controlCls = 'ctl box-border h-[36px] w-full rounded-[8px] border border-inputline bg-white px-[12px] font-[inherit] text-[13px] focus:border-teal focus:outline-none'
 
 /**
  * Both merge `className` rather than replacing it.
@@ -844,7 +938,7 @@ export function Textarea({ className, rows = 3, ...props }: TextareaHTMLAttribut
     <textarea
       {...props}
       rows={rows}
-      className={`ctl box-border w-full resize-y rounded-[6px] border border-inputline bg-white px-[11px] py-[8px] font-[inherit] text-[13px] leading-[1.5] focus:border-teal focus:outline-none ${className ?? ''}`}
+      className={`ctl box-border w-full resize-y rounded-[8px] border border-inputline bg-white px-[12px] py-[8px] font-[inherit] text-[13px] leading-[1.5] focus:border-teal focus:outline-none ${className ?? ''}`}
     />
   )
 }
@@ -859,28 +953,35 @@ export function Textarea({ className, rows = 3, ...props }: TextareaHTMLAttribut
  * button's default size. Two components meaning "the action here" is one too
  * many; the difference between them was never more than scale.
  */
-export function PrimaryButton({ children, onClick, className, size = 'md', disabled }: {
+export function PrimaryButton({ children, onClick, className, size = 'md', disabled, tone = 'ink' }: {
   children: ReactNode
   onClick?: () => void
   className?: string
   size?: 'sm' | 'md'
   disabled?: boolean
+  /** `danger` for the button that deletes or replaces something: the one
+   * action in a confirmation that should not look like every other Save. */
+  tone?: 'ink' | 'danger'
 }) {
+  const fill = tone === 'danger'
+    ? 'bg-redf text-white hover:bg-redtext disabled:hover:bg-redf'
+    : 'bg-ink text-white hover:bg-inkhov disabled:hover:bg-ink'
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`${size === 'sm' ? SM : MD} cursor-pointer bg-ink text-white transition-colors hover:bg-inkhov disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-ink ${className ?? ''}`}
+      className={`${size === 'sm' ? SM : MD} cursor-pointer transition-[background-color,border-color,color,transform] duration-150 active:scale-[.985] motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 ${fill} ${className ?? ''}`}
     >
       {children}
     </button>
   )
 }
 
-export function GhostButton({ children, onClick, disabled, title, size = 'md' }: {
+export function GhostButton({ children, onClick, disabled, title, size = 'md', className = '' }: {
   children: ReactNode
   onClick?: () => void
+  className?: string
   /** `sm` for a card header or toolbar, `md` at the foot of a form - the two
    *  control heights the app has. */
   size?: 'sm' | 'md'
@@ -896,7 +997,7 @@ export function GhostButton({ children, onClick, disabled, title, size = 'md' }:
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`${size === 'sm' ? SM : MD} cursor-pointer border border-inputline bg-white text-lab transition-colors hover:bg-fill2 disabled:cursor-default disabled:opacity-50`}
+      className={`${size === 'sm' ? SM : MD} cursor-pointer border border-inputline bg-white text-lab transition-[background-color,border-color,color,transform] duration-150 active:scale-[.985] motion-reduce:transition-none hover:bg-fill2 disabled:cursor-default disabled:opacity-50 disabled:active:scale-100 ${className}`}
     >
       {children}
     </button>
@@ -904,9 +1005,69 @@ export function GhostButton({ children, onClick, disabled, title, size = 'md' }:
 }
 
 /** Small neutral action button (MARK RECEIVED, CONFIRM, ASSIGN). */
+/**
+ * One option in a small set, as a card rather than a line in a dropdown.
+ *
+ * A dropdown shows one option at a time and hides what each one means, which
+ * is wrong wherever the choice has consequences - what happens to the money
+ * on a return, what a collection outcome does to an account's credit. These
+ * put the options side by side with their meaning underneath.
+ */
+export function Choices({ children, cols = 2 }: { children: ReactNode; cols?: 2 | 3 | 4 }) {
+  const grid = cols === 4 ? 'grid-cols-4' : cols === 3 ? 'grid-cols-3' : 'grid-cols-2'
+  return <div className={`grid ${grid} gap-[8px]`}>{children}</div>
+}
+
+export function ChoiceCard({ on, onClick, title, note, tone = 'accent', children }: {
+  on: boolean
+  onClick: () => void
+  title: string
+  note?: string
+  /** `bad` marks an outcome that counts against someone - a bounce, a loss. */
+  tone?: 'accent' | 'bad'
+  children?: ReactNode
+}) {
+  const ring = tone === 'bad' ? 'border-redf bg-redbadge/50' : 'border-teal bg-tealbadge/40'
+  const tick = tone === 'bad' ? 'border-redf bg-redf' : 'border-teal bg-teal'
+  return (
+    <div
+      role="radio"
+      aria-checked={on}
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
+      className={`relative flex cursor-pointer flex-col rounded-[10px] border px-[12px] py-[10px] text-left transition-[background-color,border-color,transform] duration-150 active:scale-[.99] motion-reduce:transition-none ${
+        on ? ring : 'border-line bg-white hover:border-inputline hover:bg-fill2'
+      }`}
+    >
+      <span className="flex items-start justify-between gap-[8px]">
+        <span className="text-[13px] font-semibold leading-[1.3]">{title}</span>
+        <span className={`mt-[1px] flex h-[16px] w-[16px] shrink-0 items-center justify-center rounded-full border ${on ? `${tick} text-white` : 'border-inputline bg-white'}`}>
+          {on && <Check size={10} strokeWidth={3} />}
+        </span>
+      </span>
+      {note && <span className="mt-[3px] font-meta text-[12px] leading-[1.4] text-mut">{note}</span>}
+      {children}
+    </div>
+  )
+}
+
+/** A numbered question, so a short form reads as a sequence. */
+export function Step({ n, title, children, last }: { n: number; title: string; children: ReactNode; last?: boolean }) {
+  return (
+    <div className={`grid grid-cols-[26px_1fr] gap-x-[12px] ${last ? '' : 'mb-[20px]'}`}>
+      <span className="tnum flex h-[22px] w-[22px] items-center justify-center rounded-full bg-ink font-meta text-[11px] font-semibold text-white">{n}</span>
+      <div className="min-w-0">
+        <p className="m-0 mb-[8px] pt-[2px] text-[13px] font-semibold leading-[1.3]">{title}</p>
+        {children}
+      </div>
+    </div>
+  )
+}
+
 export function MiniDark({ children, onClick, title }: { children: ReactNode; onClick?: () => void; title?: string }) {
   return (
-    <button type="button" onClick={onClick} title={title} className={`${SM} cursor-pointer border border-inputline bg-white text-lab transition-colors hover:bg-fill2`}>
+    <button type="button" onClick={onClick} title={title} className={`${SM} shrink-0 cursor-pointer whitespace-nowrap border border-inputline bg-white text-lab transition-[background-color,border-color,color,transform] duration-150 active:scale-[.985] motion-reduce:transition-none hover:bg-fill2`}>
       {children}
     </button>
   )
@@ -945,6 +1106,49 @@ const pagerBtn = `${SM} cursor-pointer border border-inputline bg-white text-lab
  * count. The compact one drops the sentence to its numbers and the buttons to
  * their arrows, which fits a 340px column on one line.
  */
+/**
+ * The one row action for every list in the app: a 26px icon button with the
+ * verb as its tooltip and accessible name. Lists used to mix uppercase text
+ * links ("EDIT", "REVERT") with icon buttons from screen to screen; this is
+ * the icon button, and the verbs map to fixed icons so a pencil always means
+ * edit and a bin always means delete.
+ */
+// Revert is a circling-back arrow and Return is a crossed-out package: the
+// two used to be a pair of near-identical bent arrows, which told nobody
+// which one put the status back and which one sent the fuel back.
+export const ROW_ICONS = { edit: Pencil, delete: Trash2, revert: RotateCcw, cancel: CircleX, return: PackageX } as const
+export type RowVerb = keyof typeof ROW_ICONS
+
+export function RowAction({ verb, label, onClick, icon, tone, disabled, className = '' }: {
+  verb: RowVerb
+  /** The accessible name and tooltip, e.g. "Edit Seaoil" or "Revert to ordered". */
+  label: string
+  onClick: () => void
+  /** Override the verb's icon for a one-off. */
+  icon?: LucideIcon
+  /** Red on hover for anything that removes or reverses; the default follows the verb. */
+  tone?: 'plain' | 'danger'
+  disabled?: boolean
+  className?: string
+}) {
+  const Icon = icon ?? ROW_ICONS[verb]
+  const danger = tone ? tone === 'danger' : verb !== 'edit'
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onClick() }}
+      aria-label={label}
+      data-tip={label}
+      disabled={disabled}
+      className={`inline-flex h-[26px] w-[26px] shrink-0 cursor-pointer items-center justify-center rounded-[6px] border-0 bg-transparent text-mut transition-[background-color,color,transform] duration-150 hover:bg-fill2 active:scale-[.92] disabled:cursor-default disabled:opacity-40 motion-reduce:transition-none ${
+        danger ? 'hover:text-redtext' : 'hover:text-ink'
+      } ${className}`}
+    >
+      <Icon size={14} strokeWidth={1.8} />
+    </button>
+  )
+}
+
 export function Pager({ page, totalPages, setPage, total, pageSize, noun = '', compact = false }: {
   page: number
   totalPages: number
@@ -1005,8 +1209,9 @@ export function DataTable({ cols, children, empty, sort, onSort, pageSize, reset
           give a table a minimum width, and with the to-do rail open the content
           column is narrow enough to hit it. The overflow went to the page, so
           the whole layout slid sideways under the fixed sidebar and rail. It
-          belongs to the table. */}
-      <div className="overflow-x-auto">
+          belongs to the table. The fade is for a table swapped in whole by a
+          tab switch (a `key` on the table): it comes in the way a page does. */}
+      <div className="fade-in overflow-x-auto">
         <table className="tnum w-full border-collapse text-[13px]">
         <thead>
           <tr>
@@ -1075,6 +1280,79 @@ export function PageHeader({ title, subtitle, right }: { title: ReactNode; subti
           the router, and every test rendering any screen would need to provide
           one to draw a heading. */}
       <span className="ml-auto flex items-center gap-2">{right}</span>
+    </div>
+  )
+}
+
+// ---- Loading ----------------------------------------------------------------
+
+/** One grey block, sized by the caller. */
+export function Bone({ w = '100%', h = 12, className = '' }: { w?: number | string; h?: number; className?: string }) {
+  return <span aria-hidden className={`skeleton block ${className}`} style={{ width: w, height: h }} />
+}
+
+/**
+ * The shape of an office page before its tables arrive: a title, a strip of
+ * figures, a table. Every module used to render nothing here, so a slow
+ * connection looked like a broken app. `rows` and `kpis` let a page that has
+ * no strip, or a longer table, keep roughly its own outline.
+ */
+export function PageSkeleton({ kpis = 4, rows = 6, title = true }: { kpis?: number; rows?: number; title?: boolean }) {
+  return (
+    <div className="fade-in" role="status" aria-label="Loading" aria-live="polite">
+      {title && (
+        <div className="mb-[14px] flex items-end gap-[14px]">
+          <div>
+            <Bone w={160} h={20} />
+            <Bone w={260} h={11} className="mt-[8px]" />
+          </div>
+          <Bone w={120} h={28} className="ml-auto" />
+        </div>
+      )}
+      {kpis > 0 && (
+        <div className="mb-[18px] grid gap-px overflow-hidden rounded-[8px] border border-line bg-linesoft" style={{ gridTemplateColumns: `repeat(${kpis}, minmax(0, 1fr))` }}>
+          {Array.from({ length: kpis }, (_, i) => (
+            <div key={i} className="bg-white p-[14px]">
+              <Bone w={70} h={9} />
+              <Bone w={110} h={20} className="mt-[10px]" />
+              <Bone w={90} h={10} className="mt-[8px]" />
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="overflow-hidden rounded-[8px] border border-line bg-white">
+        <div className="flex items-center gap-[10px] border-b border-linesoft px-[14px] py-[12px]">
+          <Bone w={130} h={13} />
+          <Bone w={200} h={28} className="ml-auto" />
+        </div>
+        {Array.from({ length: rows }, (_, i) => (
+          <div key={i} className="flex items-center gap-[16px] border-b border-linesoft px-[20px] py-[13px] last:border-b-0">
+            <Bone w={90} h={11} />
+            <Bone w={220} h={11} />
+            <Bone w={80} h={11} className="ml-auto" />
+            <Bone w={60} h={11} />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** The phone screens' shape: a headline figure and a list of rows. */
+export function PhoneSkeleton({ rows = 5 }: { rows?: number }) {
+  return (
+    <div className="fade-in px-[16px] pt-[18px]" role="status" aria-label="Loading" aria-live="polite">
+      <Bone w={120} h={10} />
+      <Bone w={180} h={24} className="mt-[8px]" />
+      <div className="mt-[18px] grid grid-cols-2 gap-[10px]">
+        <Bone h={56} /><Bone h={56} />
+      </div>
+      <div className="mt-[18px] flex gap-[8px]">
+        <Bone w={90} h={30} /><Bone w={80} h={30} /><Bone w={80} h={30} />
+      </div>
+      <div className="mt-[14px] flex flex-col gap-[8px]">
+        {Array.from({ length: rows }, (_, i) => <Bone key={i} h={64} />)}
+      </div>
     </div>
   )
 }

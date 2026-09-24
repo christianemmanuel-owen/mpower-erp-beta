@@ -1,4 +1,5 @@
 import { daysLate, isOverdue } from './credit'
+import { wasCollected } from './collectionStatus'
 import { installmentCollector } from './metrics'
 import type { Sale, SaleInstallment } from '../data/types'
 
@@ -79,7 +80,9 @@ export function installmentEntries(sales: Sale[]): Entry[] {
 export function collectionRate(entries: Entry[], asOf = Date.now()): CollectionRate {
   const live = entries.filter((e) => e.installment.status !== 'cancelled')
 
-  const settled = live.filter((e) => e.installment.status === 'collected')
+  // Everything the collector got hold of, whether or not the bank has paid
+  // out yet - this rate measures the person, and the bank's queue is not theirs.
+  const settled = live.filter((e) => wasCollected(e.installment.status))
   const bounced = live.filter((e) => e.installment.status === 'bounced')
   const overdue = live.filter((e) => isOverdue(e.installment, asOf))
 

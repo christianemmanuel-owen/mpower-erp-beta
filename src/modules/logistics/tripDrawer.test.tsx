@@ -78,7 +78,7 @@ describe('TripDrawer stages', () => {
 
   it('carries unsaved edits into the advance', () => {
     const onAdvance = open({ status: 'in_transit' })
-    fireEvent.change(screen.getByPlaceholderText('Name on the receipt'), { target: { value: 'A. Dela Cruz' } })
+    fireEvent.change(screen.getByPlaceholderText('Name on the signed copy'), { target: { value: 'A. Dela Cruz' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm delivery' }))
     expect(onAdvance).toHaveBeenCalledWith('delivered', expect.objectContaining({ receivedBy: 'A. Dela Cruz' }))
   })
@@ -126,5 +126,20 @@ describe('TripDrawer', () => {
     const other: Delivery = { ...trip, id: 'd2', deliveryAddress: 'Batangas depot' }
     rerender(<Drawer {...props} delivery={other} />)
     expect((screen.getByDisplayValue('Batangas depot') as HTMLInputElement).value).toBe('Batangas depot')
+  })
+})
+
+describe('viewing only', () => {
+  /** A sales or treasury seat opening a trip from a sale or the calendar:
+   *  the same drawer, nothing on it live, and only Close in the footer. */
+  it('disables every control and offers only Close', () => {
+    const onAdvance = vi.fn(async () => {})
+    render(<Drawer {...props} delivery={trip} onAdvance={onAdvance} readOnly />)
+    expect(screen.getByText(/Viewing only/)).toBeTruthy()
+    // The stage nav lists a 'Close' stage too, hence the count.
+    expect(screen.getAllByRole('button', { name: 'Close' }).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: 'Save trip' })).toBeNull()
+    const dlg = screen.getByRole('dialog')
+    expect(dlg.querySelectorAll('input:enabled, select:enabled, textarea:enabled').length).toBe(0)
   })
 })

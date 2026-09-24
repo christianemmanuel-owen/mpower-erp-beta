@@ -8,19 +8,20 @@ import {
 } from 'recharts'
 import { useTables } from '../../lib/data'
 import {
-  agentStats, daysOfCover, flowSeries, inRange, netSaleVolume, recentActivity,
+  agentStats, daysOfCoverTrailing, flowSeries, inRange, netSaleVolume, recentActivity,
   revenue, stockByWarehouse, stockSeries, volumeIn, volumeOut,
   type ActivityEvent, type DateRange, type FlowPoint, type StockSeriesPoint,
 } from '../../lib/metrics'
-import { RangePicker, useRange } from '../../lib/range'
+import { RangePicker, rangeDays, useRange } from '../../lib/range'
 import { canAccess, useAuth } from '../../lib/auth'
-import { WIDGET_LABELS, orderWidgets, reorderWithinGroup, resolveWidgets } from '../../lib/dashboardConfig'
+import {
+  DASHBOARD_TABS, WIDGET_LABELS, WIDGET_TAB, orderWidgets, reorderWithinGroup, resolveWidgets, type DashboardTab,
+} from '../../lib/dashboardConfig'
 import { repos } from '../../data/repo'
 import AnnouncementsCard from './AnnouncementsCard'
 import { PendingBanner } from '../settings/Approvals'
-import { todayISO, fmtCompactPeso, fmtCurrency, fmtLiters, label } from '../../lib/format'
-import { InfoTip, Card, Gauge, GhostButton, KpiStrip, PageHeader, PrimaryButton, SectionLabel } from '../../components/ui'
-import CashFlowCalendar from './CashFlowCalendar'
+import { todayISO, fmtCurrency, fmtLiters, label } from '../../lib/format'
+import { InfoTip, Card, Gauge, GhostButton, KpiStrip, PageHeader, PrimaryButton, SectionLabel, PageSkeleton } from '../../components/ui'
 import NeedsAttentionCard from './NeedsAttention'
 import { IncomingCard, MovementsCard } from './OperationsCards'
 import { ReceivablesCard, ToCollectCard, TopAgentsCard } from './CashFlowCards'
@@ -82,12 +83,17 @@ function etaLabel(d: Delivery, now: number): string | null {
 /** The "and percentage" half of Exhibit A 1.1's headline numbers. Renders
  * nothing when there is no prior period to compare against - an absent
  * comparison is honest, whereas "0%" claims the figure held steady. */
-function Movement({ pct, inline = false }: { pct: number | null; inline?: boolean }) {
+function Movement({ pct, inline = false, days }: { pct: number | null; inline?: boolean; days?: number }) {
   if (pct === null) return inline ? null : <span>no prior period</span>
   const up = pct >= 0
   return (
     <span className={`${inline ? 'ml-2 ' : ''}font-semibold text-lab`}>
       <span className="align-[1px] text-[10px] text-faint">{up ? '▲' : '▼'}</span> {Math.abs(pct).toFixed(1)}%
+      {/* Said on the figure, not only in the header tip: "vs prior 7 days" is
+          the part a reader has to know to read the arrow at all. */}
+      {days !== undefined && !inline && (
+        <span className="font-normal text-mut"> vs prior {days === 1 ? 'day' : `${days} days`}</span>
+      )}
     </span>
   )
 }
@@ -234,13 +240,12 @@ function FlowChart({ series, from, to }: { series: FlowPoint[]; from: number; to
  * useful right-hand value, because "82%" does not tell a dispatcher whether to
  * order - 6 days of cover does.
  */
-function DepotsCard({ warehouses, stock, series, purchases, sales, range, thresholds }: {
+function DepotsCard({ warehouses, stock, series, purchases, sales, thresholds }: {
   warehouses: Warehouse[]
   stock: Map<string, number>
   series: StockSeriesPoint[]
   purchases: Purchase[]
   sales: Sale[]
-  range: DateRange
   thresholds: StockThreshold[]
 }) {
   return (
@@ -255,7 +260,7 @@ function DepotsCard({ warehouses, stock, series, purchases, sales, range, thresh
         const threshold = thresholds.find((t) => t.warehouseId === w.id && t.active !== false)
         const short = threshold ? threshold.thresholdLiters - onHand : 0
         const below = short > 0
-        const cover = daysOfCover(purchases, sales, w.id, range)
+        const cover = daysOfCoverTrailing(purchases, sales, w.id).days
         const values = series.map((pt) => pt.values[w.id] ?? 0)
         return (
           <div key={w.id} className="flex items-center gap-[10px] border-b border-linesoft px-[14px] py-[11px] last:border-0">
@@ -354,7 +359,7 @@ export default function Dashboard() {
   const [saving, setSaving] = useState(false)
   // Leaving the page mid-arrange should discard the draft, not persist it.
   useEffect(() => () => setArranging(null), [])
-  if (!data) return null
+  if (!data) return <PageSkeleton />
   const { purchases, sales, warehouses, agents, deliveries, customers, trucks, personnel, suppliers, stockThresholds, products } = data
 
   const today = todayISO()
@@ -396,6 +401,14 @@ export default function Dashboard() {
 
   const prevSold = volumeOut(sales, prev)
   const delta = pctDelta(sold, prevSold)
+  const days = rangeDays(range)
+
+  // Stock on hand is a level, not a flow: it is always what the depots hold
+  // now, whatever range is picked. What the range can say about it is how it
+  // moved - today's figure less the net of what came in and went out over the
+  // range is what it stood at when the range began.
+  const stockAtStart = totalStock - (volumeIn(purchases, range) - sold)
+  const stockDelta = pctDelta(totalStock, stockAtStart)
 
   const inVol = volumeIn(purchases, range)
   const inDelta = pctDelta(inVol, volumeIn(purchases, prev))
@@ -481,41 +494,59 @@ export default function Dashboard() {
           <KpiStrip
             delay={30}
             items={[
-              ...(hasStock ? [{ label: 'Stock on hand', value: fmtLiters(totalStock), sub: <span>across {warehouses.length} depot{warehouses.length === 1 ? '' : 's'}</span> }] : []),
               ...(hasStock ? [{
-                label: (
-                  <span className="inline-flex items-center gap-[5px]">
-                    Volume in
-                    <InfoTip label="What counts as volume in">
-                      Purchases marked received; an order placed but not yet delivered
-                      is not in this figure. Where a delivery was booked in through
-                      Receive, it counts on the arrival date at the volume that
-                      actually arrived. Where it was only marked received, there is no
-                      arrival date or received volume to use, so it falls back to the
-                      order date and the ordered volume - which is what most of this
-                      book does.
-                    </InfoTip>
+                label: 'Stock on hand',
+                tip: { label: 'Stock on hand', body: (<>
+                    Fuel in all depots right now: everything received, less everything
+                    sold. The date range does not change this number. The arrow shows
+                    how much stock went up or down since the start of the range.
+                </>) },
+                value: fmtLiters(totalStock),
+                to: '/inventory',
+                sub: (
+                  <span>
+                    as of today, {warehouses.length} depot{warehouses.length === 1 ? '' : 's'}
+                    {stockDelta !== null && (
+                      <span className="ml-2 font-semibold text-lab">
+                        <span className="align-[1px] text-[10px] text-faint">{stockDelta >= 0 ? '▲' : '▼'}</span>{' '}
+                        {Math.abs(stockDelta).toFixed(1)}%<span className="font-normal text-mut"> over the range</span>
+                      </span>
+                    )}
                   </span>
                 ),
-                value: fmtLiters(inVol),
-                sub: <Movement pct={inDelta} />,
               }] : []),
-              ...(hasSales ? [{ label: 'Volume sold', value: fmtLiters(sold), sub: <Movement pct={delta} /> }] : []),
+              ...(hasStock ? [{
+                label: 'Volume in',
+                tip: { label: 'Volume in', body: (<>
+                    Litres received from suppliers in the selected range. Orders not yet
+                    delivered are not counted. The arrow compares this figure with the same
+                    figure for the {days === 1 ? 'day' : `${days} days`} before that.
+                </>) },
+                value: fmtLiters(inVol),
+                to: '/inventory/purchases',
+                sub: <Movement pct={inDelta} days={days} />,
+              }] : []),
+              ...(hasSales ? [{
+                label: 'Volume sold',
+                tip: { label: 'Volume sold', body: (<>
+                    Litres sold to customers in the selected range. Drafts and cancelled
+                    sales are not counted; returned fuel is taken off. The arrow compares this
+                    figure with the same figure for the {days === 1 ? 'day' : `${days} days`} before that.
+                </>) },
+                value: fmtLiters(sold),
+                to: '/sales',
+                sub: <Movement pct={delta} days={days} />,
+              }] : []),
               ...(hasTrips ? [{
-                label: (
-                  <span className="inline-flex items-center gap-[5px]">
-                    Deliveries
-                    <InfoTip label="How deliveries are counted">
-                      Counted on the date Logistics finally scheduled a trip for, not
-                      the date the customer asked for - so a trip pushed to next week
-                      counts next week. Completed means it reached delivered, so a
-                      failed trip counts as scheduled but not completed, and so does
-                      one still loading or on the road. A range ending today will
-                      always read low for that reason rather than for failures.
-                    </InfoTip>
-                  </span>
-                ),
+                label: 'Deliveries',
+                tip: { label: 'Deliveries', body: (<>
+                    Delivered trips out of all trips scheduled in the selected range.
+                    Trips still on the road, or that failed, count as scheduled but not
+                    delivered. The arrow compares the number scheduled with the number
+                    scheduled in the {days === 1 ? 'day' : `${days} days`} before that.
+                </>) },
                 value: `${completedInRange.length}/${scheduledInRange.length}`,
+                to: '/logistics',
                 sub: completionPct === null
                   ? <span>none scheduled</span>
                   : <span>{Math.round(completionPct)}% completed<Movement pct={scheduledDelta} inline /></span>,
@@ -545,7 +576,7 @@ export default function Dashboard() {
               </div>
               <div className="text-right">
                 <SectionLabel>Revenue</SectionLabel>
-                <p className="tnum m-0 mt-1 font-display text-[28px] font-semibold tracking-[-0.02em]">{fmtCompactPeso(rev)}</p>
+                <p className="tnum m-0 mt-1 font-display text-[28px] font-semibold tracking-[-0.02em]">{fmtCurrency(rev)}</p>
               </div>
             </div>
             <div className="min-h-[150px] flex-1">
@@ -557,7 +588,7 @@ export default function Dashboard() {
     stockByWarehouse: () => hasStock ? [{ key: 'depots', width: 'half' as const, node: (
           <DepotsCard
             warehouses={warehouses} stock={stock} series={stockSer}
-            purchases={purchases} sales={sales} range={range}
+            purchases={purchases} sales={sales}
             thresholds={stockThresholds}
           />
     ) }] : [],
@@ -578,15 +609,6 @@ export default function Dashboard() {
             </div>
             </Card>
       ) }] : [],
-    cashFlow: () => (hasSales || hasStock) ? [{ key: 'cash-flow', width: 'full', node: (
-          <Card className="p-[14px]" delay={125}>
-            <div className="mb-3 flex items-baseline justify-between">
-              <h3 className="m-0 text-[13px] font-semibold">Cash flow calendar</h3>
-            </div>
-            {/* Receivables come from sales, payables from purchases - each side only for seats with that module. */}
-            <CashFlowCalendar sales={hasSales ? sales : []} purchases={hasStock ? purchases : []} customers={customers} suppliers={suppliers} />
-          </Card>
-    ) }] : [],
     deliveryBoard: () => hasTrips ? [{ key: 'movements', width: 'full' as const, node: (
           <MovementsCard
             deliveries={deliveries} sales={sales} customers={customers}
@@ -602,7 +624,6 @@ export default function Dashboard() {
       { key: 'top-agents', width: 'half', node: (
           <TopAgentsCard
             stats={stats}
-            monthLabel={new Date().toLocaleDateString('en-PH', { month: 'long' })}
           />
       ) },
     ] : [],
@@ -644,40 +665,9 @@ export default function Dashboard() {
     ) }] : [],
   }
 
-  /**
-   * Which tab each widget belongs to.
-   *
-   * A dashboard that answers four different questions on one scroll answers
-   * none of them quickly. The categories are subjects rather than urgency, so a
-   * card's tab is predictable: you learn once that trips live under Operations
-   * and you never hunt for them again.
-   *
-   * `kpis` puts four cards on screen and they all sit in Overview together -
-   * the band, the volume trend, depot fill and bought-vs-sold are all forms of
-   * "how are we doing", which is what Overview is for.
-   */
-  const TABS = ['Overview', 'Operations', 'Cash flow', 'Activity'] as const
-  type Tab = (typeof TABS)[number]
-
-  const WIDGET_TAB: Record<DashboardWidget, Tab> = {
-    kpis: 'Overview',
-    needsAttention: 'Overview',
-    volumeSold: 'Overview',
-    announcements: 'Overview',
-    // Bought vs sold plots liters in against liters out, so it belongs with
-    // stock rather than with money, and next to the Depots card it explains.
-    stockByWarehouse: 'Operations',
-    incoming: 'Operations',
-    deliveryBoard: 'Operations',
-    boughtVsSold: 'Operations',
-    agentQuota: 'Cash flow',
-    receivables: 'Cash flow',
-    cashFlow: 'Cash flow',
-    recentTransactions: 'Activity',
-    approvals: 'Activity',
-    // Lives in the side rail, so it contributes no blocks and needs no tab.
-    todos: 'Activity',
-  }
+  // Tab membership is shared with the per-role editor - see dashboardConfig.
+  const TABS = DASHBOARD_TABS
+  type Tab = DashboardTab
 
   // A tab with nothing in it for this seat is not shown at all, rather than
   // leading somewhere blank or advertising widgets the seat cannot see.
@@ -742,14 +732,11 @@ export default function Dashboard() {
         title={
           <span className="inline-flex items-center gap-[8px]">
             Welcome, {seatName}
-            <InfoTip label="What the ▲▼ arrows compare against">
-              Only the ▲▼ arrows are comparisons: each measures the selected range
-              against the period of the same length immediately before it, so a
-              fortnight is read against the fortnight before. An arrow replaced by
-              "no prior period" means that earlier period had none of the thing being
-              measured - which is not the same as no change. Percentages without an
-              arrow are shares of a whole, not comparisons: depot fill, quota
-              progress, and the share of deliveries completed.
+            <InfoTip label="How to read the figures">
+              ▲▼ arrows compare the selected range with the same number of days just
+              before it. "No prior period" means there was nothing to compare with.
+              Percentages without an arrow are shares of a whole, such as how full a
+              depot is.
             </InfoTip>
           </span>
         }

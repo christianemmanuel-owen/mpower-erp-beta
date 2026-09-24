@@ -10,6 +10,9 @@ export interface Env {
   /** Uploaded digital copies. Optional so local dev without an R2 binding still
    * boots - the attachment endpoints return a clear 503 instead of crashing. */
   DOCS?: R2Bucket
+  /** Turns on Google routing for drive-time estimates; without it the free
+   * OSRM server is used. See server/routing.ts. */
+  GOOGLE_MAPS_API_KEY?: string
 }
 
 export type Rec = Record<string, unknown>
@@ -24,6 +27,17 @@ export interface Seat extends Rec {
   modules?: string[]
   /** May approve pending inputs (Secondary Feature 2.1). Admins always may. */
   canApprove?: boolean
+  /** Writes post directly instead of parking for approval. */
+  bypassApproval?: boolean
+  /** The Personnel record this login is - see src/data/types.ts. Field seats
+   *  carry it; office seats do not. */
+  personnelId?: string
+  /** 'own' means a field seat: their trips, their sales, their collections,
+   *  enforced in server/scope.ts. Blank or 'all' is the office. */
+  scope?: 'own' | 'all'
+  /** Resolved from the seat's Personnel row when the session loads, so a sale's
+   *  agentId can be matched against the person signing in. Never stored. */
+  agentId?: string
 }
 
 export const now = () => new Date().toISOString()

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { ToastProvider } from '../../components/Toast'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { queryClient } from '../../lib/queryClient'
@@ -90,7 +90,8 @@ describe('Stock page', () => {
     expect(screen.getByText('Depots')).toBeTruthy()
     cleanup()
     renderPage('movements')
-    expect(screen.getByText('Movements')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Movements' })).toBeTruthy()
+    expect(screen.getByLabelText('Depot')).toBeTruthy()
     cleanup()
     renderPage('purchases')
     expect(screen.getByText('Purchases')).toBeTruthy()
@@ -107,11 +108,22 @@ describe('Stock page', () => {
     expect(screen.getByText(/set by an administrator/i)).toBeTruthy()
   })
 
-  it('projects days of cover from the recent rate of sale', () => {
-    // 19,000 in, 4,000 out over 31 days. The figure is what you reorder against.
-    renderPage('levels')
-    const row = depotRow('Valenzuela')
-    expect(within(row).getByText(/days$/)).toBeTruthy()
+  it('projects days of cover from the last 30 days of sales, not the range', () => {
+    // 4,000 L sold on Jul 10. Seen from Jul 31 that is inside the trailing
+    // window and there is a rate to project from; seen from September it is
+    // not, and the row says "no sales" rather than inventing one.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-07-31T12:00:00.000Z'))
+      renderPage('levels')
+      expect(within(depotRow('Valenzuela')).getByText(/days$/)).toBeTruthy()
+      cleanup()
+      vi.setSystemTime(new Date('2026-09-30T12:00:00.000Z'))
+      renderPage('levels')
+      expect(within(depotRow('Valenzuela')).getByText(/no sales/i)).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('says so plainly when a depot has no sales to project from', () => {
@@ -147,16 +159,65 @@ describe('Stock page', () => {
     expect(within(row).getByText(/\+15,000 L/)).toBeTruthy()
   })
 
-  it('traces each movement to the record it came from', () => {
+  it('opens a movement for its details, with the record it came from one click away', () => {
     renderPage('movements')
-    expect(screen.getByText('Petrolink Bulk').closest('a')?.getAttribute('href')).toBe('/purchases/p1')
-    expect(screen.getByText('Sunrise Bus Lines').closest('a')?.getAttribute('href')).toBe('/sales/s1')
+    fireEvent.click(screen.getByText('Petrolink Bulk'))
+    const dlg = screen.getByRole('dialog', { name: /Received from Petrolink Bulk/ })
+    expect(within(dlg).getByText('19,000 L on Jul 3, 2026')).toBeTruthy()
+    expect(within(dlg).getByRole('link', { name: 'Open the purchase' }).getAttribute('href')).toBe('/purchases/p1')
+    fireEvent.click(within(dlg).getAllByRole('button', { name: 'Close' })[0])
+    fireEvent.click(screen.getByText('Sunrise Bus Lines'))
+    const sale = screen.getByRole('dialog', { name: /Sold to Sunrise Bus Lines/ })
+    expect(within(sale).getByRole('link', { name: 'Open the sale' }).getAttribute('href')).toBe('/sales/s1')
   })
 
   it('does not render NaN% for a depot with no capacity recorded', () => {
     renderPage()
     const row = depotRow('Cebu')
-    expect(within(row).getByText('not set')).toBeTruthy()
+    expect(within(row).getByText('no capacity')).toBeTruthy()
     expect(row.textContent).not.toMatch(/NaN/)
+  })
+
+  /** The client's asks on the Stock page: press a depot and see all of its
+   *  activity; value the tank at a moving average; say where the litres came
+   *  from. All three are behind one row click. */
+  it('opens a depot for its activity, cost and sources', () => {
+    renderPage('levels')
+    // Average fill over the range replaced the level sparkline: an "average" row
+    // under "today" in the Utilization cell, labelled in words.
+    expect(within(depotRow('Valenzuela')).getByText('average')).toBeTruthy()
+    expect(within(depotRow('Valenzuela')).getByText('today')).toBeTruthy()
+    fireEvent.click(depotRow('Valenzuela'))
+    const dlg = screen.getByRole('dialog', { name: 'Valenzuela depot' })
+    expect(within(dlg).getByText(/Received from/)).toBeTruthy()
+    expect(within(dlg).getByText(/Sold to/)).toBeTruthy()
+    // 19,000 in at 50, 4,000 out: 15,000 L on hand at ₱50.00 moving average.
+    expect(within(dlg).getByText('₱50.00/L')).toBeTruthy()
+    // Every litre came from the one supplier.
+    const sources = within(dlg).getByRole('table', { name: 'Stock by supplier' })
+    expect(within(sources).getByText('Petrolink Bulk')).toBeTruthy()
+    expect(within(sources).getByText('100%')).toBeTruthy()
+  })
+
+  it('reads the sources as of an earlier day', () => {
+    renderPage('levels')
+    fireEvent.click(depotRow('Valenzuela'))
+    fireEvent.change(screen.getByLabelText('Sources as of'), { target: { value: '2026-07-01' } })
+    // Before the Jul 3 receipt there was nothing in the tank.
+    expect(screen.getByText(/Nothing in the tank on/)).toBeTruthy()
+  })
+
+  it('offers the supplier mix in more than one form, and remembers the pick', () => {
+    renderPage('levels')
+    const pick = () => screen.getByLabelText('View') as HTMLSelectElement
+    expect(pick().value).toBe('bars')
+    fireEvent.change(pick(), { target: { value: 'mosaic' } })
+    expect(screen.getByRole('img', { name: /area proportional to litres/ })).toBeTruthy()
+    fireEvent.change(pick(), { target: { value: 'supplier' } })
+    expect(screen.getByRole('img', { name: /by supplier and depot/ })).toBeTruthy()
+    cleanup()
+    renderPage('levels')
+    expect(pick().value).toBe('supplier')
+    localStorage.removeItem('stock.supplierMix.view')
   })
 })

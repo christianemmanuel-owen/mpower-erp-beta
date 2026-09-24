@@ -53,6 +53,8 @@ To give your client access: create a seat for them (Admin → Seats, tick the mo
 
 `schema.sql` is entirely `IF NOT EXISTS`, so `npm run db:remote` is safe to re-run against a live database — that is how the infrastructure tables are added to a deployment that predates them. Until the R2 bucket exists, uploads return a clear "document storage isn't configured" message rather than failing oddly; everything else works.
 
+**Route planning (optional).** The trip drawer's "Plan on the map" opens a map with the depot, a pin for the delivery address (drag it to the gate), and the ways there with their drive times; choosing one sets the trip's time needed. Depots are placed on the same map under Admin & settings → Depots. Behind it are `/api/route-estimate` and `/api/geocode`. Out of the box it uses OpenStreetMap's public routing (OSRM + Nominatim): free, no key, no live traffic. For traffic-aware figures, add a Google Maps API key with the **Routes API** and **Geocoding API** enabled as the environment variable `GOOGLE_MAPS_API_KEY` (Cloudflare Pages → Settings → Variables, or `.dev.vars` locally); the app switches to Google automatically. Waze has no public routing API, and its road data is Google's, so this is the equivalent. One request per click, so the free tier goes a long way.
+
 Subsequent deploys are just `npm run deploy` (or connect the repo in the Cloudflare dashboard: build command `npm run build`, output `dist`, root directory `app`).
 
 ## Run locally

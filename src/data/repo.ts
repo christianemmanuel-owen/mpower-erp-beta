@@ -2,9 +2,9 @@ import { api } from '../lib/api'
 import { queryClient } from '../lib/queryClient'
 import { fetchTable, tableKey, type TableName } from '../lib/data'
 import type {
-  Announcement, AttendanceRecord, Base, DashboardConfig, DashboardLayout, Delivery, DrugTest, Holiday,
+  Announcement, AttendanceRecord, Base, DashboardConfig, DashboardLayout, Delivery, DrugTest, Hauler, Holiday,
   HrSettingsRecord, LeaveRecord, PayrollRun, Personnel, PricePosting, Product, Purchase,
-  Sale, Seat, Shift, StockThreshold, SupplierQuote, Todo, TruckBanRule, VehicleMaintenance,
+  Sale, Seat, Shift, StockThreshold, SupplierQuote, Todo, TruckBanRule, VehicleMaintenance, AppSetting,
 } from './types'
 
 /** Same interface the app has always used - now backed by the D1 API instead of
@@ -49,6 +49,7 @@ export class Repo<T extends Base> {
 
 export const repos = {
   suppliers: new Repo('suppliers'),
+  haulers: new Repo<Hauler>('haulers'),
   warehouses: new Repo('warehouses'),
   agents: new Repo('agents'),
   customers: new Repo('customers'),
@@ -76,6 +77,7 @@ export const repos = {
   truckBanRules: new Repo<TruckBanRule>('truckBanRules'),
   dashboardConfigs: new Repo<DashboardConfig>('dashboardConfigs'),
   dashboardLayouts: new Repo<DashboardLayout>('dashboardLayouts'),
+  appSettings: new Repo<AppSetting>('appSettings'),
 }
 
 /** Confirming a delivery-type sale creates its Delivery record. */
@@ -109,7 +111,7 @@ export async function confirmSale(sale: Sale, info: { address: string; contactPe
 
 /** Blocks deleting a lookup that is referenced by transactions. */
 export async function safeDeleteLookup(
-  kind: 'suppliers' | 'warehouses' | 'agents' | 'customers' | 'bankAccounts' | 'personnel' | 'trucks',
+  kind: 'suppliers' | 'warehouses' | 'agents' | 'customers' | 'bankAccounts' | 'personnel' | 'trucks' | 'haulers',
   id: string,
 ): Promise<{ ok: boolean; reason?: string }> {
   const [purchases, sales, deliveries, quotes] = await Promise.all([
@@ -122,7 +124,10 @@ export async function safeDeleteLookup(
     (kind === 'customers' && sales.some((s) => s.customerId === id)) ||
     (kind === 'bankAccounts' && sales.some((s) => s.bankAccountId === id)) ||
     (kind === 'personnel' && deliveries.some((d) => [d.driverId, d.pahinanteId, d.loaderId, d.guardId].includes(id))) ||
-    (kind === 'trucks' && deliveries.some((d) => d.truckId === id))
+    (kind === 'trucks' && deliveries.some((d) => d.truckId === id)) ||
+    // A purchase keeps its own copy of the hauler's details, so deleting the
+    // saved hauler loses nothing on the record - it is not a blocker.
+    (kind === 'haulers' && false)
   if (used) return { ok: false, reason: 'This record is used by existing transactions and can’t be deleted.' }
   await repos[kind].remove(id)
   return { ok: true }

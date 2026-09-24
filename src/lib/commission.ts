@@ -1,4 +1,5 @@
 import { netSaleVolume } from './metrics'
+import { isSettled } from './collectionStatus'
 import type { CommissionRate, Sale, SaleInstallment } from '../data/types'
 
 /**
@@ -104,12 +105,18 @@ export function commissionLines(
     if (sale.agentId !== agentId || !commissionable(sale)) continue
 
     for (const inst of sale.installments) {
-      if (inst.status !== 'collected') continue
-      // An installment collected before collectedAt existed has no date to place
-      // it in a period. Falling back to the due date is the honest guess: it is
-      // what the record itself claims about when the money was expected, and the
-      // alternative is dropping the commission entirely.
-      const when = (inst.collectedAt ?? inst.dueDate).slice(0, 10)
+      // Cleared, not merely collected. Commission on a post-dated check that
+      // later bounces is money out of the door against money that never came
+      // in, and clawing it back off the next payslip is worse than waiting the
+      // few days for the bank.
+      if (!isSettled(inst.status)) continue
+      // Placed in the period the money landed in, which is the clearing date.
+      // Older records carry no clearing timestamp - they were written when
+      // "collected" meant "in the bank" - so they fall back to the collection
+      // date and then to the due date. Falling back is the honest guess: it is
+      // what the record itself claims about when the money was expected, and
+      // the alternative is dropping the commission entirely.
+      const when = (inst.clearedAt ?? inst.collectedAt ?? inst.dueDate).slice(0, 10)
       if (when < periodStart || when > periodEnd) continue
 
       const share = installmentShare(sale, inst)

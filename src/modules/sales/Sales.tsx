@@ -5,14 +5,15 @@ import { nanoid } from 'nanoid'
 import { fetchTable, useTables } from '../../lib/data'
 import { confirmSale, repos } from '../../data/repo'
 import {
-  agentStats, inRange, isInstallmentOverdue, revenue, stockByWarehouse, volumeOut,
+  agentStats, cameBackToStock, inRange, isInstallmentOverdue, revenue, stockOnDate, volumeOut,
   type DateRange,
 } from '../../lib/metrics'
-import { RangePicker, useRange } from '../../lib/range'
+import { RangePicker, rangeDays, useRange } from '../../lib/range'
 import { useQuickCreate } from '../../lib/quickCreate'
 import { compareValues, useSortableTable } from '../../lib/sort'
-import { todayISO, addDaysISO, fmtCompactPeso, fmtCurrency, fmtDate, fmtLiters, fmtNum, fmtTerm, label } from '../../lib/format'
-import { InfoTip, ExportButton, Card, Chip, DataTable, Dialog, Field, FormSection, GhostButton, Input, KpiStrip, MiniDark, PageHeader, PrimaryButton, Select, filterCls, td } from '../../components/ui'
+import { todayISO, addDaysISO, fmtCurrency, fmtDate, fmtLiters, fmtNum, fmtTerm, label } from '../../lib/format'
+import { bouncedFor, bouncedNote } from '../../lib/bouncedChecks'
+import { ExportButton, Card, Chip, DataTable, Dialog, Field, FormSection, GhostButton, Input, KpiStrip, MiniDark, PageHeader, PrimaryButton, RowAction, Select, filterCls, td, WIDE_DIALOG, PageSkeleton } from '../../components/ui'
 import { InstallmentEditor, installmentTotal, standardInstallmentPresets, type InstallmentRow } from '../../components/InstallmentEditor'
 import { RailAside, RailClose, RailDelta, RailRow, RailSection, RailTotal } from '../../components/SummaryRail'
 import { FormNav, useSectionNav, type FormNavSection } from '../../components/FormNav'
@@ -23,13 +24,16 @@ import { usePendingRecord } from '../../lib/deepLink'
 import { isPending } from '../../lib/approvals'
 import { exportTable } from '../../lib/exportXlsx'
 import { hasCatalog, productName, productOptions } from '../../lib/products'
-import { planRevertResolution } from '../../lib/orderResolution'
+import { TREATMENT_LABELS, planRevertResolution } from '../../lib/orderResolution'
 import ResolveOrderDialog from './ResolveOrderDialog'
-import type { Agent, BankAccount, Customer, Personnel, Product, Sale, Warehouse } from '../../data/types'
+import SalesTrend from './SalesTrend'
+import { isSettled, wasCollected } from '../../lib/collectionStatus'
+import type { Agent, BankAccount, Customer, Personnel, Product, Purchase, Sale, Warehouse } from '../../data/types'
 
 const saleInstallmentStatusOptions = [
   { value: 'pending', label: 'Pending' },
   { value: 'collected', label: 'Collected' },
+  { value: 'bounced', label: 'Bounced check' },
   { value: 'cancelled', label: 'Cancelled' },
 ]
 
@@ -71,9 +75,9 @@ export default function Sales() {
     setEditingSale(null)
   }
 
-  const data = useTables(['sales', 'purchases', 'agents', 'customers', 'warehouses', 'bankAccounts', 'personnel', 'products'] as const)
-  if (!data) return null
-  const { sales, purchases, agents, customers, warehouses, bankAccounts, personnel, products } = data
+  const data = useTables(['sales', 'purchases', 'agents', 'customers', 'warehouses', 'bankAccounts', 'personnel', 'products', 'deliveries'] as const)
+  if (!data) return <PageSkeleton />
+  const { sales, purchases, agents, customers, warehouses, bankAccounts, personnel, products, deliveries } = data
   const showProduct = hasCatalog(products)
 
   // Exhibit A 1.1 - a dashboard click lands here with the record to open. Done
@@ -94,10 +98,12 @@ export default function Sales() {
   const rev = revenue(sales, range)
   const prevSold = volumeOut(sales, prevRange(range))
   const delta = prevSold > 0 ? ((sold - prevSold) / prevSold) * 100 : null
+  const days = rangeDays(range)
 
   const sortAccessors: Record<string, (s: Sale) => string | number> = {
     date: (s) => s.date,
     customer: (s) => customer(s.customerId)?.company ?? '',
+    agent: (s) => agentName(s.agentId),
     volume: (s) => s.volumeLiters,
     total: (s) => s.volumeLiters * s.pricePerLiter,
     payment: (s) => label(s.paymentMode),
@@ -118,9 +124,9 @@ export default function Sales() {
     // has one; the flat legacy fields are the fallback for records written
     // before it existed.
     const result = await confirmSale(s, {
-      address: c?.delivery?.address ?? c?.address ?? '',
-      contactPerson: c?.delivery?.contactPerson ?? c?.contactPerson ?? '',
-      contactNumber: c?.delivery?.contactNumber ?? c?.contactNumber ?? '',
+      address: s.deliveryAddress ?? c?.delivery?.address ?? c?.address ?? '',
+      contactPerson: s.contactPerson ?? c?.delivery?.contactPerson ?? c?.contactPerson ?? '',
+      contactNumber: s.contactNumber ?? c?.delivery?.contactNumber ?? c?.contactNumber ?? '',
     })
     // Confirm is the primary action on this page, and under the default
     // approval rules it is exactly the kind of write that gets parked. Dropping
@@ -173,12 +179,34 @@ export default function Sales() {
    * misreported as one flat status. */
   function installmentBadge(installments: Sale['installments']) {
     const total = installments.length
-    const collected = installments.filter((i) => i.status === 'collected').length
+    // Paid means cleared. A check in hand or at the bank is neither paid nor
+    // still to be collected, so a plan with one of those reads as in flight
+    // rather than flattening to either.
+    const paid = installments.filter((i) => isSettled(i.status)).length
+    const inFlight = installments.filter((i) => wasCollected(i.status) && !isSettled(i.status)).length
     const allCancelled = total > 0 && installments.every((i) => i.status === 'cancelled')
-    const allCollected = total > 0 && collected === total
-    const statusKey = allCancelled ? 'cancelled' : allCollected ? 'collected' : 'pending'
-    const text = total > 1 && !allCancelled && !allCollected ? `${collected}/${total} collected` : label(statusKey)
+    const allPaid = total > 0 && paid === total
+    const statusKey = allCancelled ? 'cancelled' : allPaid ? 'cleared' : inFlight > 0 && paid + inFlight === total ? 'deposited' : 'pending'
+    const text = allCancelled ? label('cancelled')
+      : allPaid ? label('cleared')
+        : total > 1 ? `${paid}/${total} cleared${inFlight ? ` · ${inFlight} in flight` : ''}`
+          : inFlight ? 'In flight' : label('pending')
     return { statusKey, text, anyOverdue: installments.some((i) => isInstallmentOverdue(i)) }
+  }
+
+  /** The DR number on the trip this sale created, once dispatch typed it. */
+  const drNumberOf = (s: Sale) => deliveries.find((d) => d.saleId === s.id)?.documents?.deliveryReceipt?.referenceNo
+  /** Cash, COD, or the credit term - from the sale's own term when it has
+   *  one, else read off how far the last due date sits from the sale date. */
+  const termsOf = (s: Sale) => {
+    // Cash is already named as the mode beside this; saying it twice reads
+    // as two different facts that happen to agree.
+    if (s.paymentMode === 'cash') return null
+    if (s.termDays !== undefined) return fmtTerm(s.termDays)
+    const last = s.installments.reduce((m, i) => (i.dueDate > m ? i.dueDate : m), '')
+    if (!last) return '—'
+    const days = Math.round((Date.parse(last) - Date.parse(s.date)) / 86_400_000)
+    return fmtTerm(Math.max(days, 0))
   }
 
   /** Secondary Feature 2.12 - exports exactly what is filtered on screen. */
@@ -189,7 +217,7 @@ export default function Sales() {
       [
         'Date', 'Client PO', 'Customer', 'Agent', 'Depot', 'Product', 'Fulfillment',
         'Scheduled', 'Volume (L)', 'Price per liter', 'Total', 'Payment mode', 'Status',
-        'Reason', 'Treatment', 'Volume returned (L)',
+        'Reason', 'Treatment', 'Volume returned (L)', 'Back in stock',
       ],
       list.map((s) => [
         s.date.slice(0, 10),
@@ -206,8 +234,9 @@ export default function Sales() {
         label(s.paymentMode),
         label(s.status),
         s.resolution?.reason ?? '',
-        s.resolution ? label(s.resolution.treatment) : '',
+        s.resolution ? TREATMENT_LABELS[s.resolution.treatment] : '',
         s.resolution?.volumeReturned ?? null,
+        s.status === 'returned' ? (cameBackToStock(s) ? 'Yes' : 'No') : '',
       ]),
     )
   }
@@ -222,24 +251,27 @@ export default function Sales() {
         right={<><RangePicker /><CreateAction /></>}
       />
 
-      <div className="mb-[18px] grid grid-cols-[2fr_1.2fr] gap-[18px]">
+      <div className="mb-[18px] grid grid-cols-[2fr_1.2fr] items-stretch gap-[18px]">
+        <div className="flex flex-col gap-[18px]">
         <KpiStrip
           delay={50}
           items={[
             {
-              label: (
-                <span className="inline-flex items-center gap-[5px]">
-                  Volume sold
-                  <InfoTip label="What volume sold counts">
-                    Volume that left a depot, counted on the sale date. Drafts and
-                    cancelled orders count as nothing. A return is netted down only by
-                    what came back into stock: a return settled by refund, credit note,
-                    replacement or write-off still counts in full, because the fuel
-                    went out and did not come back. The percentage compares with the
-                    period of the same length immediately before the selected range.
-                  </InfoTip>
-                </span>
-              ),
+              label: 'Volume sold',
+              tip: {
+                label: 'Volume sold',
+                body: (
+                  <>
+                    Net litres sold, counted on the sale date. An order counts once it is
+                    confirmed against the client&rsquo;s PO - the sale is made then, whether
+                    or not the fuel has left the depot. Drafts and cancelled orders count
+                    as nothing; a returned order comes off in full (or by the volume
+                    returned), whatever was done about the money. Stock on hand is a
+                    separate figure and is not this one. The arrow compares this figure
+                    with the same figure for the {days} day{days === 1 ? '' : 's'} before that.
+                  </>
+                ),
+              },
               value: fmtLiters(sold),
               sub: delta !== null && (
                 <span className={`font-semibold ${delta >= 0 ? 'text-teal' : 'text-redtext'}`}>
@@ -248,23 +280,32 @@ export default function Sales() {
               ),
             },
             {
-              label: (
-                <span className="inline-flex items-center gap-[5px]">
-                  Revenue
-                  <InfoTip label="How the average is worked out">
-                    Volume times the agreed price on each sale. The average underneath
-                    is this revenue divided by the same net volume above it, so the two
-                    figures always agree - it is not an average of the per-sale prices,
-                    which would weight a 200-litre sale the same as a 20,000-litre one.
-                  </InfoTip>
-                </span>
-              ),
-              value: fmtCompactPeso(rev),
-              sub: <span>avg {sold > 0 ? `₱${(rev / sold).toFixed(2)}/L` : '—'}</span>,
+              label: 'Net sales',
+              tip: {
+                label: 'Net sales',
+                body: (
+                  <>
+                    Sales less returns, in pesos: each order&rsquo;s volume times its
+                    agreed price, with returned orders taken off in full.
+                    <br /><br />
+                    The average underneath is <b>net sales ÷ volume sold</b> - this
+                    figure divided by the Volume sold tile to the left. Both cover the
+                    same orders, so the two always agree. It is not an average of the
+                    per-sale prices, which would weight a 200-litre sale the same as a
+                    20,000-litre one.
+                  </>
+                ),
+              },
+              value: fmtCurrency(rev),
+              // The figure, not the working: how it is arrived at is in the
+              // tooltip beside the label, where every other explanation lives.
+              sub: <span>{sold > 0 ? `₱${(rev / sold).toFixed(2)}/L average` : 'No volume sold in the period'}</span>,
             },
             { label: 'Drafts', value: fmtNum(drafts), sub: <span>waiting to confirm</span> },
           ]}
         />
+        <SalesTrend sales={sales} range={range} />
+        </div>
         {/* The dashboard's card, not a second implementation of it.
             This one coloured its bar red below half quota and amber below
             eighty, which reads as an emergency on the third of the month and
@@ -274,7 +315,6 @@ export default function Sales() {
             nobody had sold anything in the period. */}
         <TopAgentsCard
           stats={agentStats(agents, sales, range)}
-          monthLabel={new Date().toLocaleDateString('en-PH', { month: 'long' })}
         />
       </div>
 
@@ -309,8 +349,9 @@ export default function Sales() {
             pageSize={10}
             resetKey={`${search}|${agentFilter}|${paymentFilter}|${statusFilter}|${sort?.key}|${sort?.dir}|${range.from}|${range.to}`}
             cols={[
-              { label: 'Date', sortKey: 'date' }, { label: 'Customer / agent', sortKey: 'customer' }, { label: 'Volume (₱/L)', align: 'right', sortKey: 'volume' },
-              { label: 'Total', align: 'right', sortKey: 'total' }, { label: 'Payment', sortKey: 'payment' }, { label: 'Status', sortKey: 'status' }, { label: '' },
+              { label: 'Date', sortKey: 'date' }, { label: 'Customer', sortKey: 'customer' }, { label: 'Agent', sortKey: 'agent' },
+              { label: 'Order', align: 'right', sortKey: 'total' }, { label: 'Fulfilment' }, { label: 'Payment', sortKey: 'payment' },
+              { label: 'Status', sortKey: 'status' }, { label: '' },
             ]}
           >
             {rows.map((s) => (
@@ -318,25 +359,36 @@ export default function Sales() {
                 <td className={`${td} whitespace-nowrap pl-5 text-mut`}>{fmtDate(s.date)}</td>
                 <td className={td}>
                   <p className="m-0 font-semibold">{customer(s.customerId)?.company ?? '—'}</p>
-                  <p className="m-0 text-[12px] text-faint">
-                    {agentName(s.agentId)} · {s.fulfillment === 'delivery' ? 'Delivery' : 'Customer pickup'}
-                    {showProduct ? ` · ${productName(products, s.productId)}` : ''}
-                  </p>
-                  {s.clientPoReferenceNo && <p className="m-0 text-[12px] text-faint">Client PO {s.clientPoReferenceNo}</p>}
+                  {s.clientPoReferenceNo && <p className="m-0 text-[12px] text-sec">PO {s.clientPoReferenceNo}</p>}
+                  {(() => { const n = bouncedNote(bouncedFor(s.customerId, sales)); return n ? <p className="m-0 mt-[2px]"><Chip status="overdue" text="Bounced checks" /></p> : null })()}
                 </td>
+                <td className={`${td} text-sec`}>{agentName(s.agentId)}</td>
+                {/* Volume, price and total together, as one figure read down:
+                    the litres, what each cost, what that comes to. Secondary
+                    lines are a shade lighter, not faded out. */}
                 <td className={`${td} whitespace-nowrap text-right`}>
-                  <p className="m-0 font-semibold">{fmtLiters(s.volumeLiters)}</p>
-                  <p className="m-0 text-[12px] text-faint">₱{s.pricePerLiter.toFixed(2)}/L</p>
+                  <p className="tnum m-0 text-sec">{fmtLiters(s.volumeLiters)}</p>
+                  <p className="tnum m-0 text-sec">₱{s.pricePerLiter.toFixed(2)}/L</p>
+                  <p className="tnum m-0 font-semibold text-ink">{fmtCurrency(s.volumeLiters * s.pricePerLiter)}</p>
                 </td>
-                <td className={`${td} whitespace-nowrap text-right font-semibold`}>{fmtCurrency(s.volumeLiters * s.pricePerLiter).replace('.00', '')}</td>
                 <td className={td}>
-                  <p className="m-0 mb-[2px] text-mut">{label(s.paymentMode)}</p>
+                  <p className="m-0">{s.fulfillment === 'delivery' ? 'Delivery' : 'Customer pickup'}</p>
+                  <p className="m-0 text-[12px] text-sec">
+                    {s.invoiceNo ? `Invoice ${s.invoiceNo}` : 'No invoice yet'}
+                    {' · '}
+                    {drNumberOf(s) ? `DR ${drNumberOf(s)}` : s.fulfillment === 'delivery' ? 'No DR yet' : 'No DR'}
+                  </p>
+                  {showProduct && <p className="m-0 text-[12px] text-sec">{productName(products, s.productId)}</p>}
+                </td>
+                <td className={td}>
+                  <p className="m-0 mb-[2px]">{label(s.paymentMode)}{termsOf(s) ? ` · ${termsOf(s)}` : ''}</p>
                   {(() => {
                     const badge = installmentBadge(s.installments)
                     return (
                       <span className="inline-flex flex-wrap items-center gap-[5px]">
                         <Chip status={badge.statusKey} text={badge.text} />
                         {badge.anyOverdue && <Chip status="overdue" text="Overdue" />}
+                        {s.installments.some((i) => i.status === 'bounced') && <Chip status="overdue" text="Bounced" />}
                       </span>
                     )
                   })()}
@@ -347,12 +399,12 @@ export default function Sales() {
                       into a report nobody opens. */}
                   {s.resolution && (
                     <p className="m-0 mt-[3px] max-w-[190px] text-[12px] text-faint" title={s.resolution.reason}>
-                      {label(s.resolution.treatment)} - {s.resolution.reason}
+                      {TREATMENT_LABELS[s.resolution.treatment]}{s.status === 'returned' ? (cameBackToStock(s) ? ' · back in stock' : ' · fuel not returned') : ''} - {s.resolution.reason}
                     </p>
                   )}
                 </td>
                 <td className={`${td} pr-5 text-right`}>
-                  <span className="inline-flex items-center gap-3">
+                  <span className="inline-flex items-center gap-[4px]">
                     {s.status === 'draft' && <MiniDark onClick={() => confirm(s)}>Confirm</MiniDark>}
                     {s.status === 'confirmed' && <MiniDark onClick={() => markFulfilled(s)}>Mark fulfilled</MiniDark>}
                     {/* Exhibit A 1.3 - cancelled and returned orders, with reason
@@ -360,30 +412,26 @@ export default function Sales() {
                         returning applies after, which is why a fulfilled order
                         offers Return and an unfulfilled one offers Cancel. */}
                     {(s.status === 'draft' || s.status === 'confirmed') && (
-                      <button
-                        onClick={() => setResolving({ sale: s, kind: 'cancelled' })}
-                        className="cursor-pointer px-[2px] py-1 text-[11px] font-semibold uppercase text-faint hover:text-redtext hover:underline"
-                      >
-                        Cancel
-                      </button>
+                      <RowAction verb="cancel" label="Cancel this order" onClick={() => setResolving({ sale: s, kind: 'cancelled' })} />
                     )}
                     {s.status === 'fulfilled' && (
-                      <button
-                        onClick={() => setResolving({ sale: s, kind: 'returned' })}
-                        className="cursor-pointer px-[2px] py-1 text-[11px] font-semibold uppercase text-faint hover:text-redtext hover:underline"
-                      >
-                        Return
-                      </button>
+                      <RowAction verb="return" label="Record a return of this order" onClick={() => setResolving({ sale: s, kind: 'returned' })} />
                     )}
+                    {/* The tooltip says exactly where the order goes back to,
+                        because "revert" on its own next to "return" is a coin toss. */}
                     {s.status !== 'draft' && (
-                      <button
+                      <RowAction
+                        verb="revert"
+                        label={
+                          s.status === 'fulfilled' ? 'Undo fulfilment - back to confirmed'
+                            : s.status === 'confirmed' ? 'Undo confirmation - back to draft'
+                            : s.status === 'returned' ? 'Undo the return - back to fulfilled'
+                            : 'Undo the cancellation - back to where it was'
+                        }
                         onClick={() => revertStatus(s)}
-                        className="cursor-pointer px-[2px] py-1 text-[11px] font-semibold uppercase text-faint hover:text-redtext hover:underline"
-                      >
-                        Revert
-                      </button>
+                      />
                     )}
-                    <button onClick={() => openEdit(s)} className="cursor-pointer px-[2px] py-1 text-[11px] font-semibold uppercase text-tealtext hover:underline">Edit</button>
+                    <RowAction verb="edit" label="Edit sale" onClick={() => openEdit(s)} />
                   </span>
                 </td>
               </tr>
@@ -394,7 +442,7 @@ export default function Sales() {
       <SaleForm
         open={formOpen} onClose={closeForm} editing={editingSale}
         agents={agents} customers={customers} warehouses={warehouses} bankAccounts={bankAccounts}
-        personnel={personnel} stock={stockByWarehouse(purchases, sales)}
+        personnel={personnel} purchases={purchases} sales={sales}
         products={products} showProduct={showProduct}
         onNotice={toast}
       />
@@ -409,7 +457,11 @@ export default function Sales() {
   )
 }
 
-function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankAccounts, personnel, stock, products, showProduct, onNotice }: {
+export function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankAccounts, personnel, purchases, sales, products, showProduct, onNotice, readOnly = false }: {
+  /** Shown to a seat that may look but not change it - a treasurer opening
+   *  a sale from the deposit queue. Every control is disabled and the footer
+   *  only closes; the server refuses the edit anyway (foreignFieldProblem). */
+  readOnly?: boolean
   open: boolean
   onClose: () => void
   editing: Sale | null
@@ -418,7 +470,8 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
   warehouses: Warehouse[]
   bankAccounts: BankAccount[]
   personnel: Personnel[]
-  stock: Map<string, number>
+  purchases: Purchase[]
+  sales: Sale[]
   products: Product[]
   showProduct: boolean
   onNotice: (message: string) => void
@@ -432,64 +485,89 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
   // blank form for a new sale (state used to persist across Cancel/reopen otherwise).
   useEffect(() => {
     if (!open) return
-    setForm(editing ? saleToForm(editing) : newSaleForm())
+    setForm(editing ? saleToForm(editing, customers.find((c) => c.id === editing.customerId)) : newSaleForm())
     setConfirmNow(true)
     setOverrideStock(false)
     setShowProblems(false)
     setError(null)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, editing])
   const set = (k: string, v: unknown) => setForm((f) => ({ ...f, [k]: v }))
 
   const selectedCustomer = customers.find((c) => c.id === form.customerId)
   const activePersonnel = personnel.filter((p) => p.active !== false)
+
+  // Picking a customer fills in who receives the fuel and where, from the
+  // customer's card - editable after, because this order may go somewhere
+  // else. Only on a new sale, and only when the customer changes.
+  const pickCustomer = (id: string) => {
+    const c = customers.find((x) => x.id === id)
+    setForm((f) => ({
+      ...f,
+      customerId: id,
+      contactPerson: c?.delivery?.contactPerson ?? c?.contactPerson ?? '',
+      contactNumber: c?.delivery?.contactNumber ?? c?.contactNumber ?? '',
+      deliveryAddress: c?.delivery?.address ?? c?.address ?? '',
+      // The customer's standing term is the default; cash stays cash.
+      termDays: f.paymentMode === 'cash' ? 0 : (c?.paymentTermDays ?? f.termDays),
+    }))
+  }
+
+  // Volume times the price per litre is the total - typed once, computed
+  // once, never two numbers that can disagree.
+  const totalPrice = Math.round(form.volumeLiters * form.pricePerLiter * 100) / 100
+
   // Automation: while the installment plan is still just the default single row (the common
-  // case), its due date auto-fills from the customer's own standing payment term (cash always
-  // settles same-day) whenever the customer, sale date, or payment mode changes - same as it
-  // would in a real invoicing flow. The moment someone builds out a real multi-installment
-  // plan (or is editing an existing sale), their entries are left alone.
+  // case), its due date auto-fills from the chosen terms (cash settles same-day) whenever the
+  // sale date, terms or payment mode change. The moment someone builds out a real
+  // multi-installment plan (or is editing an existing sale), their entries are left alone.
   useEffect(() => {
-    if (editing || !open || !selectedCustomer || form.installments.length !== 1) return
-    const due = form.paymentMode === 'cash' ? form.date : addDaysISO(form.date, selectedCustomer.paymentTermDays)
+    if (editing || !open || form.installments.length !== 1) return
+    const due = form.paymentMode === 'cash' ? form.date : addDaysISO(form.date, form.termDays)
     setForm((f) => (f.installments.length !== 1 || f.installments[0].dueDate === due
       ? f
       : { ...f, installments: [{ ...f.installments[0], dueDate: due }] }))
-  }, [form.customerId, form.date, form.paymentMode, editing, open, selectedCustomer, form.installments.length])
-  // Same convenience for the amount: a single default row's base amount tracks the total price
-  // field so the common one-payment case never needs the number typed twice.
+  }, [form.date, form.paymentMode, form.termDays, editing, open, form.installments.length])
+  // Same convenience for the amount: a single default row's base amount tracks the total so
+  // the common one-payment case never needs the number typed twice.
   useEffect(() => {
     if (editing || !open || form.installments.length !== 1) return
-    const amt = Math.round(form.totalPrice * 100) / 100
-    setForm((f) => (f.installments.length !== 1 || f.installments[0].principal === amt
+    setForm((f) => (f.installments.length !== 1 || f.installments[0].principal === totalPrice
       ? f
-      : { ...f, installments: [{ ...f.installments[0], principal: amt }] }))
-  }, [form.totalPrice, editing, open, form.installments.length])
+      : { ...f, installments: [{ ...f.installments[0], principal: totalPrice }] }))
+  }, [totalPrice, editing, open, form.installments.length])
 
-  // When editing, this sale's own volume is already subtracted from the depot's current
-  // stock - add it back (if the depot hasn't changed) so editing to the same or a smaller
-  // volume never falsely trips the "exceeds stock" warning.
-  const alreadyCounted = editing && editing.warehouseId === form.warehouseId ? editing.volumeLiters : 0
-  const available = Math.max((stock.get(form.warehouseId) ?? 0) + alreadyCounted, 0)
+  // What the depot can promise on the day this order leaves: stock on hand
+  // plus the confirmed orders that leave after it. The date has to be picked
+  // first, which is why it sits above the depot in the form.
+  const onDate = (warehouseId: string) => {
+    const r = stockOnDate(purchases, sales.filter((x) => x.id !== editing?.id), warehouseId, form.scheduleDate || form.date)
+    return r
+  }
+  const depotNow = form.warehouseId ? onDate(form.warehouseId) : null
+  const available = Math.max(depotNow?.available ?? 0, 0)
   const exceeds = form.volumeLiters > available
-  // The form takes the total the customer pays; price per liter - the value actually
-  // stored on the sale, and what every other screen (Sales, Accounts) reads - is derived.
-  const pricePerLiter = form.volumeLiters > 0 ? form.totalPrice / form.volumeLiters : 0
+  const stockAfter = Math.max(available - form.volumeLiters, 0)
 
   // What the collection plan actually covers. The InstallmentEditor draws its own
   // balance check, but it sits below the fold from where the total is typed.
   const planned = form.installments.reduce((sum, i) => sum + i.principal, 0)
-  const unplanned = Math.round((form.totalPrice - planned) * 100) / 100
-  const stockAfter = Math.max(available - form.volumeLiters, 0)
+  const unplanned = Math.round((totalPrice - planned) * 100) / 100
+
+  // Bounced checks this customer already has on file, before another is taken.
+  const bounced = selectedCustomer ? bouncedNote(bouncedFor(selectedCustomer.id, sales)) : null
 
   const problems: Record<string, string> = {}
-  if (!form.customerId) problems.customerId = 'Select a customer.'
   if (!form.agentId) problems.agentId = 'Select the sales agent.'
+  if (!form.customerId) problems.customerId = 'Select a customer.'
+  if (!form.scheduleDate) problems.scheduleDate = 'Pick the pickup or delivery date first - stock is checked for that day.'
   if (!form.warehouseId) problems.warehouseId = 'Select the source depot.'
   if (form.volumeLiters <= 0) problems.volumeLiters = 'Enter the volume sold.'
-  if (form.totalPrice <= 0) problems.totalPrice = 'Enter the total price.'
+  if (form.pricePerLiter <= 0) problems.pricePerLiter = 'Enter the price per litre.'
   if (form.paymentMode === 'bank_transfer' && !form.bankAccountId) {
     problems.bankAccountId = 'Select the receiving bank account.'
   }
-  if (exceeds && !overrideStock) problems.warehouseId = 'Exceeds available stock. Authorise a pre-sale to proceed.'
+  if (exceeds && !overrideStock) problems.warehouseId = 'Exceeds what the depot can promise on that day. Authorise a pre-sale to proceed.'
   if (form.installments.length === 0) problems.installments = 'Add at least one collection entry.'
   else if (form.installments.some((i) => i.principal <= 0 || !i.dueDate)) {
     problems.installments = 'Each collection entry requires an amount and a due date.'
@@ -504,13 +582,12 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
    * empty.
    */
   const SECTIONS: { id: string; title: string; keys: string[]; filled: () => boolean }[] = [
-    { id: 'sec-who', title: 'Customer & agent', keys: ['customerId', 'agentId'], filled: () => !!form.customerId && !!form.agentId },
-    { id: 'sec-fuel', title: 'Order details', keys: ['volumeLiters', 'totalPrice', 'warehouseId'], filled: () => form.volumeLiters > 0 && form.totalPrice > 0 && !!form.warehouseId },
+    { id: 'sec-who', title: 'Agent & customer', keys: ['agentId', 'customerId'], filled: () => !!form.customerId && !!form.agentId },
+    { id: 'sec-fuel', title: 'Order details', keys: ['scheduleDate', 'volumeLiters', 'pricePerLiter', 'warehouseId', 'bankAccountId'], filled: () => form.volumeLiters > 0 && form.pricePerLiter > 0 && !!form.warehouseId && !!form.scheduleDate },
     // Optional throughout, so it is done the moment anything is in it and
     // never nags when it is empty.
-    { id: 'sec-po', title: 'Client PO', keys: [], filled: () => !!form.clientPoReferenceNo.trim() },
-    { id: 'sec-delivery', title: 'Delivery & payment', keys: ['bankAccountId'], filled: () => !!form.scheduleDate },
-    { id: 'sec-plan', title: 'Collection plan', keys: ['installments'], filled: () => form.installments.length > 0 && Math.abs(form.totalPrice - planned) < 0.01 },
+    { id: 'sec-po', title: 'References', keys: [], filled: () => !!form.clientPoReferenceNo.trim() || !!form.invoiceNo.trim() },
+    { id: 'sec-plan', title: 'Collection plan', keys: ['installments'], filled: () => form.installments.length > 0 && Math.abs(totalPrice - planned) < 0.01 },
   ]
   const navSections: FormNavSection[] = SECTIONS.map((sec) => ({
     id: sec.id,
@@ -520,25 +597,27 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
   const { active, jump } = useSectionNav(SECTIONS.map((sec) => sec.id))
 
   async function save() {
-    // Every problem at once, on the field it belongs to. This used to be nine
-    // sequential `return setError(...)` guards, so you fixed the first to be
-    // told about the second - and the message appeared in a banner at the top
-    // rather than on the control that was wrong.
+    // Every problem at once, on the field it belongs to.
     setShowProblems(true)
     if (Object.keys(problems).length > 0) {
       setError(`${Object.keys(problems).length === 1 ? 'One field needs' : `${Object.keys(problems).length} fields need`} attention.`)
       return
     }
-    const { totalPrice: _totalPrice, installments, productId, ...rest } = form
+    const { installments, productId, ...rest } = form
     const payload = {
       ...rest,
       // Blank means the default product - see src/lib/products.ts.
       productId: productId || undefined,
-      pricePerLiter: Math.round(pricePerLiter * 100) / 100,
+      pricePerLiter: Math.round(form.pricePerLiter * 100) / 100,
       date: new Date(form.date).toISOString(),
       scheduleDate: new Date(form.scheduleDate).toISOString(),
       scheduleTime: form.scheduleTime || undefined,
       clientPoReferenceNo: form.clientPoReferenceNo.trim() || undefined,
+      invoiceNo: form.invoiceNo.trim() || undefined,
+      contactPerson: form.contactPerson.trim() || undefined,
+      contactNumber: form.contactNumber.trim() || undefined,
+      deliveryAddress: form.deliveryAddress.trim() || undefined,
+      termDays: form.paymentMode === 'cash' ? 0 : form.termDays,
       bankAccountId: form.paymentMode === 'bank_transfer' ? form.bankAccountId : undefined,
       collectorId: form.collectorId || undefined,
       installments: installments.map((i) => ({
@@ -551,6 +630,8 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
         collectorId: i.collectorId,
         bankAccountId: i.bankAccountId,
         collectedAt: i.collectedAt,
+        referenceNo: i.referenceNo,
+        notes: i.notes,
       })) as Sale['installments'],
     }
     setError(null)
@@ -575,11 +656,10 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
               : sale.message,
           )
         } else if (confirmNow) {
-          const c = customers.find((x) => x.id === form.customerId)
           await confirmSale(sale, {
-            address: c?.address ?? '',
-            contactPerson: c?.contactPerson ?? '',
-            contactNumber: c?.contactNumber ?? '',
+            address: form.deliveryAddress,
+            contactPerson: form.contactPerson,
+            contactNumber: form.contactNumber,
           })
         }
       }
@@ -592,30 +672,40 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
     onClose()
   }
 
+  const termOptions = [0, 7, 15, 30, 45, 60, 90]
+  const customTerm = !termOptions.includes(form.termDays)
+
   return (
     <Dialog
       open={open}
-      title={editing ? 'Edit sale' : 'New sale'}
+      title={readOnly ? 'Sale' : editing ? 'Edit sale' : 'New sale'}
       subtitle={selectedCustomer?.company}
       onClose={onClose}
-      width={1100}
+      width={WIDE_DIALOG}
       nav={<FormNav sections={navSections} active={active} onJump={jump} />}
       rail={
         <>
           <RailSection title="This sale">
             <RailRow label="Volume" value={form.volumeLiters > 0 ? `${fmtNum(form.volumeLiters)} L` : '—'} />
-            <RailRow label="Price per litre" value={pricePerLiter > 0 ? `₱${pricePerLiter.toFixed(2)}` : '—'} />
-            <RailTotal label="Total price" value={form.totalPrice > 0 ? fmtCurrency(form.totalPrice).replace('.00', '') : '—'} />
+            <RailRow label="Price per litre" value={form.pricePerLiter > 0 ? `₱${form.pricePerLiter.toFixed(2)}` : '—'} />
+            <RailTotal label="Total" value={totalPrice > 0 ? fmtCurrency(totalPrice) : '—'} />
+            <RailAside>
+              {form.fulfillment === 'delivery' ? 'Delivery' : 'Customer pickup'}{form.scheduleDate ? ` · ${fmtDate(form.scheduleDate)}${form.scheduleTime ? ` ${form.scheduleTime}` : ''}` : ''}
+              {' · '}{label(form.paymentMode)}{form.paymentMode === 'cash' ? '' : ` · ${fmtTerm(form.termDays)}`}
+            </RailAside>
           </RailSection>
 
-          {form.warehouseId && (
+          {form.warehouseId && depotNow && (
             <RailSection title={warehouses.find((w) => w.id === form.warehouseId)?.name ?? 'Depot'}>
-              <RailRow label="Stock now" value={`${fmtNum(available)} L`} />
+              <RailRow label="Stock on hand" value={`${fmtNum(Math.max(depotNow.onHand, 0))} L`} />
+              {depotNow.leavingLater > 0 && (
+                <RailDelta label={`Still there on ${fmtDate(form.scheduleDate || form.date)}`} value={`${fmtNum(depotNow.leavingLater)} L`} sign="+" />
+              )}
               <RailDelta label="This sale" value={`${fmtNum(form.volumeLiters)} L`} sign="-" />
               {/* A negative close is what "does not fit" looks like, so it does
                   not also need saying in words. */}
               <RailClose
-                label="Stock after"
+                label="Left that day"
                 tone={exceeds ? 'bad' : 'plain'}
                 value={exceeds
                   ? `${fmtNum(form.volumeLiters - available)} L short`
@@ -632,14 +722,14 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
             </RailSection>
           )}
 
-          {form.totalPrice > 0 && (
+          {totalPrice > 0 && (
             <RailSection title="Collection plan">
-              <RailRow label="Total price" value={fmtCurrency(form.totalPrice).replace('.00', '')} />
-              <RailDelta label="Planned" value={fmtCurrency(planned).replace('.00', '')} sign="-" />
+              <RailRow label="Total" value={fmtCurrency(totalPrice)} />
+              <RailDelta label="Planned" value={fmtCurrency(planned)} sign="-" />
               <RailClose
                 label={unplanned < 0 ? 'Over the total' : 'Left to plan'}
                 tone={Math.abs(unplanned) < 0.01 ? 'plain' : 'bad'}
-                value={fmtCurrency(Math.abs(unplanned)).replace('.00', '')}
+                value={fmtCurrency(Math.abs(unplanned))}
               />
               {Math.abs(unplanned) >= 0.01 && (
                 <RailAside tone="bad">
@@ -648,40 +738,70 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
               )}
             </RailSection>
           )}
+
+          {bounced && (
+            <RailSection title="Before taking a check">
+              <RailAside tone="bad">{bounced}</RailAside>
+            </RailSection>
+          )}
         </>
       }
-      footer={
+      footer={readOnly ? (
+        <PrimaryButton onClick={onClose}>Close</PrimaryButton>
+      ) : (
         <>
           <GhostButton onClick={onClose}>Cancel</GhostButton>
           <PrimaryButton onClick={save}>{editing ? 'Save changes' : 'Save sale'}</PrimaryButton>
         </>
-      }
+      )}
     >
+      <fieldset disabled={readOnly} className="contents [&:disabled_*]:cursor-default">
+      {readOnly && (
+        <p className="mb-3 rounded-[6px] border border-line bg-paper px-3 py-2 font-meta text-[12px] text-mut">
+          Viewing only. Changing the sale is Sales’ work; your seat records the payments on it from Collect or Treasury.
+        </p>
+      )}
       {error && (
         <p className="mb-3 rounded-[6px] border border-redf bg-redbadge px-3 py-2 text-[13px] font-semibold text-redtext">{error}</p>
       )}
-      <FormSection first id="sec-who">Customer &amp; agent</FormSection>
+
+      {/* Agent first: it is the agent booking the order who is at the
+          keyboard, and the customer is theirs. Picking the customer fills the
+          contact and address from the card. */}
+      <FormSection first id="sec-who">Agent &amp; customer</FormSection>
       <div className="grid grid-cols-2 gap-x-4 gap-y-[14px]">
-        <Field label="Customer" error={problem('customerId')}>
-          <Select value={form.customerId} onChange={(e) => set('customerId', e.target.value)}>
-            <option value="" disabled>Select a customer…</option>
-            {customers.map((c) => <option key={c.id} value={c.id}>{c.company}</option>)}
-          </Select>
-        </Field>
         <Field label="Agent" error={problem('agentId')}>
           <Select value={form.agentId} onChange={(e) => set('agentId', e.target.value)}>
             <option value="" disabled>Select an agent…</option>
             {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </Select>
         </Field>
+        <Field label="Customer" error={problem('customerId')}>
+          <Select value={form.customerId} onChange={(e) => pickCustomer(e.target.value)}>
+            <option value="" disabled>Select a customer…</option>
+            {customers.map((c) => <option key={c.id} value={c.id}>{c.company}</option>)}
+          </Select>
+        </Field>
+        <Field label="Contact person" hint={selectedCustomer ? 'From the customer’s card - change it if this order goes to someone else.' : undefined}>
+          <Input value={form.contactPerson} placeholder="Who receives the fuel" onChange={(e) => set('contactPerson', e.target.value)} />
+        </Field>
+        <Field label="Contact number">
+          <Input value={form.contactNumber} placeholder="e.g. 0917 555 0148" onChange={(e) => set('contactNumber', e.target.value)} />
+        </Field>
+        <Field label={form.fulfillment === 'delivery' ? 'Delivery address' : 'Customer address'} span2>
+          <Input value={form.deliveryAddress} placeholder="Street, barangay, city" onChange={(e) => set('deliveryAddress', e.target.value)} />
+        </Field>
       </div>
+
+      {/* The order: what, when, from where, and how it is paid - in that
+          order, because the depot's availability depends on the day. */}
       <FormSection id="sec-fuel">Order details</FormSection>
       <div className="grid grid-cols-2 gap-x-4 gap-y-[14px]">
         <Field label="Volume (L)" error={problem('volumeLiters')}>
           <Input type="number" min={1} placeholder="e.g. 5000" value={form.volumeLiters || ''} onChange={(e) => set('volumeLiters', Number(e.target.value))} />
         </Field>
-        <Field label="Total price (₱)" error={problem('totalPrice')}>
-          <Input type="number" step="0.01" min={0} placeholder="e.g. 290000" value={form.totalPrice || ''} onChange={(e) => set('totalPrice', Number(e.target.value))} />
+        <Field label="Price per litre (₱)" error={problem('pricePerLiter')} hint={totalPrice > 0 ? `Total ${fmtCurrency(totalPrice)}` : 'Volume × price gives the total.'}>
+          <Input type="number" step="0.01" min={0} placeholder="e.g. 58.00" value={form.pricePerLiter || ''} onChange={(e) => set('pricePerLiter', Number(e.target.value))} />
         </Field>
         {showProduct && (
           <Field label="Product" span2>
@@ -690,62 +810,50 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
             </Select>
           </Field>
         )}
-        <Field label="From depot" span2 error={problem('warehouseId')}>
-          <Select value={form.warehouseId} onChange={(e) => set('warehouseId', e.target.value)}>
-            <option value="" disabled>Select a depot…</option>
-            {warehouses.map((w) => (
-              <option key={w.id} value={w.id}>{w.name} - {fmtNum(Math.max(stock.get(w.id) ?? 0, 0))} L available</option>
-            ))}
-          </Select>
-        </Field>
-      </div>
-      <FormSection id="sec-po">Client purchase order</FormSection>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-[14px]">
-        <Field
-          label="Client PO reference number"
-          span2
-          hint="The reference number on the client’s own purchase order."
-        >
-          <Input
-            value={form.clientPoReferenceNo}
-            placeholder="e.g. ACME-PO-8842"
-            onChange={(e) => set('clientPoReferenceNo', e.target.value)}
-          />
-        </Field>
-      </div>
-      {editing ? (
-        <div className="mt-3">
-          <DocumentUpload tbl="sales" recordId={editing.id} slots={['clientPo']} />
-        </div>
-      ) : (
-        <p className="mt-2 text-[12px] text-faint">
-          Save the order first, then reopen it to attach the client’s PO.
-        </p>
-      )}
-
-      <FormSection id="sec-delivery">Delivery &amp; payment</FormSection>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-[14px]">
-        <Field label="Fulfillment">
+        <Field label="Fulfilment">
           <Select value={form.fulfillment} onChange={(e) => set('fulfillment', e.target.value)}>
             <option value="delivery">Delivery</option>
             <option value="pickup">Customer pickup</option>
           </Select>
         </Field>
-        <Field label="Schedule date">
+        <Field label={form.fulfillment === 'delivery' ? 'Delivery date' : 'Pickup date'} error={problem('scheduleDate')} hint="Stock is checked for this day - pick it before the depot.">
           <Input type="date" value={form.scheduleDate} onChange={(e) => set('scheduleDate', e.target.value)} />
         </Field>
         {/* Exhibit A 1.3 asks for the requested schedule with date AND time.
             Optional - plenty of orders are booked for a day, not an hour. */}
-        <Field label="Requested time" hint="Optional. Leave blank if no specific time was requested.">
+        <Field label="Requested time" optional hint="Leave blank if no particular time was asked for.">
           <Input type="time" value={form.scheduleTime} onChange={(e) => set('scheduleTime', e.target.value)} />
         </Field>
-        <Field label="Payment" span2={form.paymentMode !== 'bank_transfer'}>
-          <Select value={form.paymentMode} onChange={(e) => set('paymentMode', e.target.value)}>
-            {/* Just the method. This used to append bankAccounts[0] - "Bank transfer -
-                BDO 4521" - which named the first account in the list, not the one
-                chosen. Next to a picker reading "Metrobank 1207" the form stated
-                two different accounts for one payment, and the label was the
-                wrong one. Which account it is, is the field beside this. */}
+        <Field
+          label="From depot"
+          error={problem('warehouseId')}
+          hint={form.scheduleDate ? `Available on ${fmtDate(form.scheduleDate)}: stock on hand plus orders leaving after that day.` : 'Pick the date first.'}
+        >
+          <Select value={form.warehouseId} disabled={!form.scheduleDate} onChange={(e) => set('warehouseId', e.target.value)}>
+            <option value="" disabled>Select a depot…</option>
+            {warehouses.map((w) => (
+              <option key={w.id} value={w.id}>{w.name} - {fmtNum(Math.max(onDate(w.id).available, 0))} L available</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Terms">
+          <Select
+            value={form.paymentMode === 'cash' ? 'cash' : customTerm ? 'custom' : String(form.termDays)}
+            onChange={(e) => {
+              const v = e.target.value
+              if (v === 'cash') { set('paymentMode', 'cash'); set('termDays', 0) }
+              else if (v === 'custom') { /* keep the typed days */ }
+              else { if (form.paymentMode === 'cash') set('paymentMode', 'bank_transfer'); set('termDays', Number(v)) }
+            }}
+          >
+            <option value="cash">Cash</option>
+            {termOptions.filter((d) => d > 0).map((d) => <option key={d} value={d}>{fmtTerm(d)}</option>)}
+            <option value="0">COD (on credit, due on delivery)</option>
+            {customTerm && form.paymentMode !== 'cash' && <option value="custom">Net {form.termDays}</option>}
+          </Select>
+        </Field>
+        <Field label="Mode of payment" span2={form.paymentMode !== 'bank_transfer'}>
+          <Select value={form.paymentMode} onChange={(e) => { set('paymentMode', e.target.value); if (e.target.value === 'cash') set('termDays', 0) }}>
             <option value="bank_transfer">Bank transfer</option>
             <option value="cash">Cash</option>
             <option value="check">Check</option>
@@ -760,11 +868,31 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
           </Field>
         )}
       </div>
+
+      <FormSection id="sec-po">References</FormSection>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-[14px]">
+        <Field label="Client PO number" optional hint="The reference on the client’s own purchase order.">
+          <Input value={form.clientPoReferenceNo} placeholder="e.g. ACME-PO-8842" onChange={(e) => set('clientPoReferenceNo', e.target.value)} />
+        </Field>
+        <Field label="Sales invoice number" optional hint="Once the invoice is issued. The DR number is typed at dispatch.">
+          <Input value={form.invoiceNo} placeholder="e.g. SI-2026-0412" onChange={(e) => set('invoiceNo', e.target.value)} />
+        </Field>
+      </div>
+      {editing ? (
+        <div className="mt-3">
+          <DocumentUpload tbl="sales" recordId={editing.id} slots={['clientPo']} />
+        </div>
+      ) : (
+        <p className="mt-2 text-[12px] text-faint">
+          Save the order first, then reopen it to attach the client’s PO.
+        </p>
+      )}
+
       <FormSection id="sec-plan">
         Collection plan
-        {!editing && selectedCustomer && form.installments.length === 1 && (
+        {!editing && form.installments.length === 1 && form.paymentMode !== 'cash' && (
           <span className="ml-2 text-[10.5px] font-normal normal-case tracking-normal text-faint">
-            due date auto-fills from {selectedCustomer.company}'s {fmtTerm(selectedCustomer.paymentTermDays)} terms - add a row to split into installments
+            due date follows the {fmtTerm(form.termDays)} terms above - add a row to split into installments
           </span>
         )}
       </FormSection>
@@ -785,11 +913,11 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
         rows={form.installments}
         onChange={(rows) => set('installments', rows)}
         statusOptions={saleInstallmentStatusOptions}
-        totalPrice={form.totalPrice}
+        totalPrice={totalPrice}
         presets={standardInstallmentPresets({
           date: form.date,
-          totalPrice: form.totalPrice,
-          termDays: selectedCustomer?.paymentTermDays,
+          totalPrice,
+          termDays: form.termDays,
           pendingStatus: saleInstallmentStatusOptions[0].value,
         })}
         collectorOptions={activePersonnel.map((p) => ({ value: p.id, label: p.name }))}
@@ -801,6 +929,7 @@ function SaleForm({ open, onClose, editing, agents, customers, warehouses, bankA
           Confirm immediately - creates the delivery trip
         </label>
       )}
+      </fieldset>
     </Dialog>
   )
 }
@@ -810,13 +939,18 @@ function newSaleForm() {
     agentId: '',
     customerId: '',
     date: todayISO(),
-    totalPrice: 0,
+    pricePerLiter: 0,
     volumeLiters: 0,
     warehouseId: '',
     fulfillment: 'delivery' as Sale['fulfillment'],
     scheduleDate: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10),
     scheduleTime: '',
     clientPoReferenceNo: '',
+    invoiceNo: '',
+    contactPerson: '',
+    contactNumber: '',
+    deliveryAddress: '',
+    termDays: 30,
     productId: '',
     paymentMode: 'bank_transfer' as Sale['paymentMode'],
     bankAccountId: '',
@@ -830,20 +964,29 @@ function newSaleForm() {
   }
 }
 
-/** Loads an existing sale into the form shape - total price is derived back from the stored
- * price per liter, since that's what the form's "Total price" field takes as input. */
-function saleToForm(s: Sale) {
+/** Loads an existing sale into the form shape. A sale from before terms were
+ * stored reads its term off the last due date. */
+function saleToForm(s: Sale, customer?: Customer) {
+  const last = s.installments.reduce((m, i) => (i.dueDate > m ? i.dueDate : m), '')
+  const inferred = last ? Math.max(Math.round((Date.parse(last) - Date.parse(s.date)) / 86_400_000), 0) : 30
   return {
     agentId: s.agentId,
     customerId: s.customerId,
     date: s.date.slice(0, 10),
-    totalPrice: Math.round(s.volumeLiters * s.pricePerLiter * 100) / 100,
+    pricePerLiter: s.pricePerLiter,
     volumeLiters: s.volumeLiters,
     warehouseId: s.warehouseId,
     fulfillment: s.fulfillment,
     scheduleDate: (s.scheduleDate ?? s.date).slice(0, 10),
     scheduleTime: s.scheduleTime ?? '',
     clientPoReferenceNo: s.clientPoReferenceNo ?? '',
+    invoiceNo: s.invoiceNo ?? '',
+    // Orders booked before the snapshot existed fall back to the customer's
+    // card, so the fields are not blank on an old order.
+    contactPerson: s.contactPerson ?? customer?.delivery?.contactPerson ?? customer?.contactPerson ?? '',
+    contactNumber: s.contactNumber ?? customer?.delivery?.contactNumber ?? customer?.contactNumber ?? '',
+    deliveryAddress: s.deliveryAddress ?? customer?.delivery?.address ?? customer?.address ?? '',
+    termDays: s.termDays ?? (s.paymentMode === 'cash' ? 0 : inferred),
     productId: s.productId ?? '',
     paymentMode: s.paymentMode,
     bankAccountId: s.bankAccountId ?? '',
@@ -851,6 +994,7 @@ function saleToForm(s: Sale) {
     installments: s.installments.map((i): InstallmentRow => ({
       id: i.id, principal: i.principal, interestPct: i.interestPct, dueDate: i.dueDate.slice(0, 10), status: i.status,
       collectorId: i.collectorId, bankAccountId: i.bankAccountId, collectedAt: i.collectedAt,
+      referenceNo: i.referenceNo, notes: i.notes,
     })),
   }
 }

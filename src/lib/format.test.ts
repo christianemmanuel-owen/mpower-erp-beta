@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addDaysISO, fmtTerm } from './format'
+import { addDaysISO, fmtTerm, fmtCurrencyShort } from './format'
 
 describe('addDaysISO', () => {
   it('adds days within a month', () => {
@@ -36,5 +36,14 @@ describe('fmtTerm', () => {
   it('labels zero or negative terms as COD', () => {
     expect(fmtTerm(0)).toBe('COD')
     expect(fmtTerm(-5)).toBe('COD')
+  })
+})
+
+describe('fmtCurrencyShort', () => {
+  it('abbreviates so a summary cell never wraps', () => {
+    expect(fmtCurrencyShort(1_184_000)).toBe('₱1.18M')
+    expect(fmtCurrencyShort(312_000)).toBe('₱312k')
+    expect(fmtCurrencyShort(9_500)).toBe('₱9,500')
+    expect(fmtCurrencyShort(0)).toBe('₱0')
   })
 })

@@ -18,6 +18,10 @@ export interface InstallmentRow {
   collectorId?: string
   /** Per-installment receiving account override; empty = the sale-level account. */
   bankAccountId?: string
+  /** Check number, or the deposit slip's reference. */
+  referenceNo?: string
+  /** Why it was late, bounced, or never made. */
+  notes?: string
   /** Not edited here - carried through so saving an edited plan doesn't wipe the
    * collection timestamp Collection screens stamped on it. */
   collectedAt?: string
@@ -91,6 +95,11 @@ export function InstallmentEditor({ rows, onChange, statusOptions, totalPrice, p
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const hasCollectionFields = !!(collectorOptions || bankOptions)
   const isExpanded = (r: InstallmentRow) => expanded[r.id] ?? !!(r.collectorId || r.bankAccountId)
+  // Check number and notes are on every row, folded away until there is
+  // something in them, on both the sales and the purchase side: a post-dated
+  // check is the same paper whichever way the money is going.
+  const [paper, setPaper] = useState<Record<string, boolean>>({})
+  const paperOpen = (r: InstallmentRow) => paper[r.id] ?? !!(r.referenceNo || r.notes || r.status === 'bounced')
   const principalSum = rows.reduce((s, r) => s + r.principal, 0)
   const diff = Math.round((totalPrice - principalSum) * 100) / 100
   const balanced = Math.abs(diff) < 0.01
@@ -139,18 +148,31 @@ export function InstallmentEditor({ rows, onChange, statusOptions, totalPrice, p
    * needs and gives the rest back. Interest holds two digits and Status holds
    * one word, so both were oversized.
    */
-  const GRID = 'grid grid-cols-[18px_minmax(104px,1fr)_58px_146px_112px_auto_26px] items-center gap-x-[6px]'
+  /**
+   * Two shapes, chosen by the width the editor actually has (a container
+   * query, not the viewport - the same editor sits in a full-width card and in
+   * the middle column of a three-panel dialog). Wide: one line per installment.
+   * Under 600px: the typed amount, interest and the computed due figure stay on
+   * the first line, and the due date and status drop to a second, indented one.
+   * It used to scroll sideways inside its box instead, which put the Status
+   * column - the one an approver reads first - off the edge.
+   */
+  // Due is `minmax(104px,auto)` rather than plain `auto`: the header and each
+  // row are separate grids, and a bare auto track resolved to the width of
+  // the word "Due" in one and of "₱35,373.45" in the other, so the 1fr column
+  // took up the difference and every heading after Base amount sat ~60px to
+  // the right of its column. 104px holds a seven-figure peso amount.
+  const NARROW = '@max-[600px]:grid-cols-[18px_minmax(90px,1fr)_56px_minmax(96px,auto)_26px] @max-[600px]:gap-y-[6px]'
+  const GRID = `grid grid-cols-[18px_minmax(104px,1fr)_58px_146px_112px_minmax(104px,auto)_26px] items-center gap-x-[6px] ${NARROW}`
+  const DATE = '@max-[600px]:col-start-2 @max-[600px]:col-span-2 @max-[600px]:row-start-2'
+  const STATUS = '@max-[600px]:col-start-4 @max-[600px]:col-span-2 @max-[600px]:row-start-2'
 
   return (
-    // The row template has six fixed or minimum tracks and does not compress
-    // past about 610px. The dialog body it lives in is narrower than that once
-    // a nav and a rail are beside it, so the plan scrolls sideways in its own
-    // box rather than losing its last column off the edge of the page.
-    <div className="overflow-x-auto rounded-[8px] border border-line">
+    <div className="@container overflow-x-auto rounded-[8px] border border-line @max-[600px]:overflow-visible">
       {/* One width for every part of the editor. Without it the rows would set
           the scroll width and the preset bar and the footer would stop short of
           it, ending mid-air as soon as you scrolled right. */}
-      <div className="min-w-[620px]">
+      <div className="min-w-[620px] @max-[600px]:min-w-0">
       {presets && presets.length > 0 && (
         <div className="flex flex-wrap items-center gap-[6px] border-b border-linesoft px-[10px] py-[8px]">
           <span className="mr-[2px] font-meta text-[12px] text-mut">Start from</span>
@@ -172,8 +194,8 @@ export function InstallmentEditor({ rows, onChange, statusOptions, totalPrice, p
         <span />
         <span>Base amount</span>
         <span>Interest</span>
-        <span>Due date</span>
-        <span>Status</span>
+        <span className={DATE}>Due date</span>
+        <span className={STATUS}>Status</span>
         <span className="text-right">Due</span>
         <span />
       </div>
@@ -190,10 +212,14 @@ export function InstallmentEditor({ rows, onChange, statusOptions, totalPrice, p
               type="number" step="0.1" min={0} placeholder="0" className="nospin tnum"
               value={r.interestPct || ''} onChange={(e) => update(r.id, { interestPct: Number(e.target.value) })}
             />
-            <Input type="date" value={r.dueDate} onChange={(e) => update(r.id, { dueDate: e.target.value })} />
-            <Select value={r.status} onChange={(e) => update(r.id, { status: e.target.value })}>
-              {statusOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </Select>
+            <span className={DATE}>
+              <Input type="date" value={r.dueDate} onChange={(e) => update(r.id, { dueDate: e.target.value })} />
+            </span>
+            <span className={STATUS}>
+              <Select value={r.status} onChange={(e) => update(r.id, { status: e.target.value })}>
+                {statusOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </Select>
+            </span>
             {/* The one number on the row nobody types - what this installment
                 actually collects once its interest is on. */}
             <span className="tnum whitespace-nowrap text-right text-[13px] font-semibold text-ink">
@@ -207,6 +233,35 @@ export function InstallmentEditor({ rows, onChange, statusOptions, totalPrice, p
             >
               <X size={14} strokeWidth={2} />
             </button>
+          </div>
+
+          <div className="px-[10px] pb-[8px] pl-[38px]">
+            <button
+              type="button"
+              onClick={() => setPaper((m) => ({ ...m, [r.id]: !paperOpen(r) }))}
+              aria-expanded={paperOpen(r)}
+              className={`flex cursor-pointer items-center gap-[3px] border-0 bg-transparent p-0 font-meta text-[12px] font-semibold transition-colors hover:text-ink ${r.status === 'bounced' ? 'text-redtext' : 'text-sec'}`}
+            >
+              {paperOpen(r) ? <ChevronDown size={13} strokeWidth={2} /> : <ChevronRight size={13} strokeWidth={2} />}
+              {r.referenceNo ? `Check / ref. ${r.referenceNo}` : 'Check number and notes'}
+              {r.status === 'bounced' && ' · bounced'}
+            </button>
+            {paperOpen(r) && (
+              <div className="mt-[6px] grid grid-cols-[180px_1fr] gap-[8px]">
+                <Input
+                  value={r.referenceNo ?? ''}
+                  placeholder="Check no. / deposit ref."
+                  aria-label={`Check number for installment ${i + 1}`}
+                  onChange={(e) => update(r.id, { referenceNo: e.target.value || undefined })}
+                />
+                <Input
+                  value={r.notes ?? ''}
+                  placeholder={r.status === 'bounced' ? 'Why it bounced, and what was agreed' : 'Notes - late, partial, re-dated…'}
+                  aria-label={`Notes for installment ${i + 1}`}
+                  onChange={(e) => update(r.id, { notes: e.target.value || undefined })}
+                />
+              </div>
+            )}
           </div>
 
           {hasCollectionFields && (

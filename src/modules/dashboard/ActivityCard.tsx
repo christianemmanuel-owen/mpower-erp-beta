@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom'
+import { RecordLink } from '../../lib/peek'
 import { ModuleLink } from '../../components/ModuleLink'
 import { Avatar, Card, Chip } from '../../components/ui'
 import { useAudit } from '../../lib/approvals'
@@ -80,7 +80,7 @@ export default function ActivityCard({ activity, lineFor, fmtAgo }: {
               : <span className="h-[24px] w-[24px] shrink-0 rounded-full border border-dashed border-inputline" />}
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[13px] font-semibold">
-                {href ? <Link to={href} className="text-ink hover:underline">{line.text}</Link> : line.text}
+                {href ? <RecordLink to={href} className="text-ink hover:underline">{line.text}</RecordLink> : line.text}
               </span>
               <span className="mt-[1px] block truncate font-meta text-[12px] text-mut">
                 {actor ? `${actor} · ` : ''}{line.meta}

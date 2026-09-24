@@ -7,7 +7,7 @@ import {
   FALLBACK_SHIFT, employeeDefaults, leaveDaysInRange, leaveDaysUsed,
 } from '../../lib/payroll'
 import { todayISO, fmtDate } from '../../lib/format'
-import { Pager, Meter, InfoTip, Card, Chip, DataTable, Dialog, Field, GhostButton, Input, PrimaryButton, Select, filterCls, td } from '../../components/ui'
+import { Pager, Meter, InfoTip, Card, Chip, DataTable, Dialog, Field, GhostButton, Input, PrimaryButton, Select, filterCls, td, PageSkeleton } from '../../components/ui'
 import type { LeaveRecord, Shift } from '../../data/types'
 
 const year = () => new Date().getFullYear()
@@ -26,7 +26,7 @@ export default function LeavesTab() {
   const onFormClose = () => setFormOpen(false)
 
   // Derived above the early return below, because usePaged is a hook: calling it
-  // after `if (!data) return null` runs a different number of hooks before and
+  // after `if (!data) return <PageSkeleton />` runs a different number of hooks before and
   // after the tables load, which React refuses at exactly the moment the data
   // arrives.
   const employees = useMemo(
@@ -45,7 +45,7 @@ export default function LeavesTab() {
   const balancePage = usePaged(matchingEmployees, 4, balanceSearch)
   const balanceRows = balancePage.pageItems
 
-  if (!data) return null
+  if (!data) return <PageSkeleton />
   const { personnel, shifts, holidays, leaves } = data
   const shiftOf = (shiftId?: string | null) => shifts.find((s) => s.id === shiftId) ?? (FALLBACK_SHIFT as Shift)
   const typeOf = (id: string) => config.leaveTypes.find((t) => t.id === id)

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { RecordLink } from '../../lib/peek'
 import L from 'leaflet'
 import { recordHref } from '../../lib/deepLink'
 import type { TrackingTarget, TruckPosition } from './tracking'
@@ -91,10 +91,12 @@ function depotIcon(name: string) {
   })
 }
 
-export default function TrackingMap({ targets, depots, labels }: {
+export default function TrackingMap({ targets, depots, labels, height = 380 }: {
   targets: TrackingTarget[]
   depots: { name: string; lat: number; lng: number }[]
   labels: Record<string, TripLabel>
+  /** Map height in px. Taller when the map is the whole page. */
+  height?: number
 }) {
   const mapRef = useRef<L.Map | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -284,7 +286,7 @@ export default function TrackingMap({ targets, depots, labels }: {
 
   return (
     <div className="flex overflow-hidden rounded-[8px] border border-line">
-      <div ref={containerRef} className="relative z-0 h-[380px] flex-1 bg-paper" />
+      <div ref={containerRef} className="relative z-0 flex-1 bg-paper" style={{ height }} />
       <div className="flex w-[268px] shrink-0 flex-col border-l border-line bg-white">
         <div className="flex items-center gap-2 border-b border-linesoft px-[14px] py-[10px]">
           <span className="text-[13px] font-semibold">On the road</span>
@@ -340,13 +342,13 @@ export default function TrackingMap({ targets, depots, labels }: {
                     {label?.driver ? ` · ${label.driver}` : ''}
                     {label?.address && <span className="mt-[2px] block truncate text-faint">{label.address}</span>}
                     {href && (
-                      <Link
+                      <RecordLink
                         to={href}
                         onClick={(e) => e.stopPropagation()}
                         className="mt-[6px] inline-block font-semibold text-teal hover:underline"
                       >
                         Open trip
-                      </Link>
+                      </RecordLink>
                     )}
                   </span>
                 )}

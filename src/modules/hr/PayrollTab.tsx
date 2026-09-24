@@ -11,7 +11,7 @@ import {
 import { todayISO, fmtCompactPeso, fmtCurrency, fmtDate, label } from '../../lib/format'
 import { InfoTip,
   Card, Chip, DataTable, Field, FormSection, GhostButton, Input, KpiStrip, PrimaryButton,
-  Select, Dialog, td,
+  Select, Dialog, td, PageSkeleton,
 } from '../../components/ui'
 import { useToast } from '../../components/Toast'
 import PayslipDrawer from './PayslipDrawer'
@@ -31,7 +31,7 @@ export default function PayrollTab() {
   const [thirteenthOpen, setThirteenthOpen] = useState(false)
   const [error, setError] = useState('')
 
-  if (!data) return null
+  if (!data) return <PageSkeleton />
   const { personnel, shifts, holidays, attendance, leaves, sales, payrollRuns } = data
   const runs = [...payrollRuns].sort((a, b) => b.periodStart.localeCompare(a.periodStart))
   const openRun = runs.find((x) => x.id === openRunId)

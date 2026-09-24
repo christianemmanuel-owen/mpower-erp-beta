@@ -1,16 +1,17 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { InlineNotice } from '../../components/Notice'
-import { Check, Settings as SettingsIcon, X } from 'lucide-react'
+import { Check, History, Settings as SettingsIcon, X } from 'lucide-react'
 import ApprovalDrawer from './ApprovalDrawer'
-import { Card, DataTable, Dialog, Field, GhostButton, InfoTip, Input, MiniDark, PageHeader, PrimaryButton, td } from '../../components/ui'
+import { Card, DataTable, Dialog, Field, GhostButton, InfoTip, Input, MiniDark, PageHeader, PrimaryButton, RowAction, TabBar, td } from '../../components/ui'
 import { fmtDate } from '../../lib/format'
 import { departmentFor, submissionTitle } from '../../lib/approvalFields'
 import { useAuth } from '../../lib/auth'
 import {
-  TABLE_LABELS, useApprovalRules, useApprovals, useDecideApproval, useSaveApprovalRules,
+  TABLE_LABELS, useApprovalRules, useApprovals, useDecideApproval, useReverseApproval, useSaveApprovalRules,
   useWithdrawApproval, type ApprovalRequest, type ApprovalStatus,
 } from '../../lib/approvals'
+import { useToast } from '../../components/Toast'
 
 /**
  * Pending inputs queue - Secondary Feature 2.1.
@@ -24,6 +25,7 @@ import {
  */
 export default function Approvals() {
   const { seat } = useAuth()
+  const navigate = useNavigate()
   const mayApprove = Boolean(seat?.isAdmin || seat?.canApprove)
   const [tab, setTab] = useState<ApprovalStatus>('pending')
   const { data, isLoading } = useApprovals(tab, !mayApprove)
@@ -44,20 +46,14 @@ export default function Approvals() {
           </span>
         }
         right={
-          <div className="flex items-center gap-1">
-            {(['pending', 'approved', 'rejected'] as ApprovalStatus[]).map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setTab(s)}
-                className={`cursor-pointer rounded-[8px] px-3 py-[6px] text-[12px] font-semibold capitalize ${
-                  tab === s ? 'bg-inkcard text-white' : 'bg-fill2 text-lab hover:bg-inputline'
-                }`}
-              >
-                {s}
-              </button>
-            ))}
+          <div className="flex items-center gap-[8px]">
+            {/* The app's one tab switch - the same segmented control as the
+                Trips views - at the same 28px as the buttons beside it. */}
+            <TabBar tabs={['pending', 'approved', 'rejected'] as const} active={tab} onChange={setTab} />
             {seat?.isAdmin && <RulesButton />}
+            <MiniDark onClick={() => navigate('/settings/history')} title="Every approval, rejection, undo and edit, by who and when">
+              <span className="flex items-center gap-[6px]"><History size={13} strokeWidth={2} />History</span>
+            </MiniDark>
           </div>
         }
       />
@@ -76,8 +72,7 @@ export default function Approvals() {
               { label: 'Title' },
               { label: 'Details' },
               { label: 'Staff' },
-              { label: 'Review' },
-              { label: 'Action', align: 'right' },
+              { label: '', align: 'right' },
             ]}
             empty={
               tab === 'pending'
@@ -133,7 +128,7 @@ function RulesButton() {
         onClick={() => setOpen(true)}
         title="What needs approval"
         aria-label="What needs approval"
-        className="ml-1 flex h-[28px] w-[28px] shrink-0 cursor-pointer items-center justify-center rounded-[6px] border border-inputline bg-white text-mut transition-colors hover:border-linesoft hover:bg-fill2 hover:text-ink"
+        className="flex h-[28px] w-[28px] shrink-0 cursor-pointer items-center justify-center rounded-[6px] border border-inputline bg-white text-lab transition-colors hover:bg-fill2"
       >
         <SettingsIcon size={14} strokeWidth={1.8} />
       </button>
@@ -177,9 +172,15 @@ function Row({ row, mayApprove, mine, tab }: {
 }) {
   const decide = useDecideApproval()
   const withdraw = useWithdrawApproval()
+  const reverse = useReverseApproval()
+  const toast = useToast()
+  const { seat } = useAuth()
   const [open, setOpen] = useState(false)
   const [rejecting, setRejecting] = useState(false)
+  const [undoing, setUndoing] = useState(false)
   const [note, setNote] = useState('')
+  // A decision can be taken back by an admin, or by the approver who made it.
+  const canUndo = tab !== 'pending' && mayApprove && (seat?.isAdmin || row.decidedBy === seat?.id)
 
   // A seat that may approve still cannot wave through its own input unless it is
   // an admin - that is the entire point of the feature.
@@ -190,7 +191,19 @@ function Row({ row, mayApprove, mine, tab }: {
   const details = row.summary?.split(' - ').slice(1).join(' - ') || '—'
 
   return (
-    <tr>
+    <>
+    {/* The row itself opens the full submission, as a purchase or a history
+        entry does - the columns name four fields out of fifteen, and deciding
+        honestly means reading the rest. Notes on a decision are taken in
+        there too. */}
+    <tr
+      role="button"
+      tabIndex={0}
+      aria-label={`Review ${submissionTitle(row.action, row.tbl)} from ${row.requestedByName}`}
+      onClick={() => setOpen(true)}
+      onKeyDown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) setOpen(true) }}
+      className="cursor-pointer transition-colors hover:bg-paper focus:outline-none focus-visible:bg-paper"
+    >
       <td className={`${td} whitespace-nowrap text-mut`}>{fmtDate(row.requestedAt)}</td>
 
       <td className={`${td} whitespace-nowrap text-mut`}>{departmentFor(row.tbl)}</td>
@@ -212,19 +225,75 @@ function Row({ row, mayApprove, mine, tab }: {
 
       <td className={`${td} whitespace-nowrap text-mut`}>{row.requestedByName}</td>
 
-      <td className={td}>
-        {/* The whole submission, which is the only way to decide on one
-            honestly - the columns beside this name four fields out of fifteen.
-            Notes on a decision are taken in there too, which is why the quick
-            actions on the right no longer carry an input of their own. */}
-        <MiniDark onClick={() => setOpen(true)} title="Open the full submission">Review</MiniDark>
-        {open && (
-          <ApprovalDrawer row={row} canDecide={canDecideThis} onClose={() => setOpen(false)} />
+      <td className={`${td} text-right`} onClick={(e) => e.stopPropagation()}>
+        {canDecideThis ? (
+          /* The same shape as every other list: the thing to do as a small
+             dark text button, the housekeeping as plain icons. */
+          <span className="flex items-center justify-end gap-[4px]">
+            <MiniDark onClick={() => decide.mutate({ id: row.id, decision: 'approve', tbl: row.tbl })}>Approve</MiniDark>
+            <RowAction verb="cancel" icon={X} label="Reject" onClick={() => setRejecting(true)} />
+          </span>
+        ) : tab !== 'pending' ? (
+          <span className="flex items-center justify-end gap-[6px]">
+            <span
+              title={tab === 'approved' ? 'Approved' : 'Rejected'}
+              className={`inline-flex h-[26px] w-[26px] items-center justify-center ${tab === 'approved' ? 'text-sec' : 'text-redtext'}`}
+            >
+              {tab === 'approved' ? <Check size={14} strokeWidth={2} /> : <X size={14} strokeWidth={2} />}
+            </span>
+            {/* Decided by mistake? Back to the queue - and, for an approval,
+                the posted record is unwound. The server refuses if someone has
+                worked on it since, and says who. */}
+            {canUndo && (
+              <RowAction verb="revert" label={`Undo ${tab === 'approved' ? 'approval' : 'rejection'}`} onClick={() => setUndoing(true)} />
+            )}
+            <Dialog
+              open={undoing}
+              title={tab === 'approved' ? 'Undo this approval' : 'Undo this rejection'}
+              subtitle={`${submissionTitle(row.action, row.tbl)} · ${row.requestedByName}`}
+              onClose={() => { setUndoing(false); setNote('') }}
+              width={480}
+              footer={
+                <>
+                  <GhostButton onClick={() => { setUndoing(false); setNote('') }}>Cancel</GhostButton>
+                  <PrimaryButton
+                    disabled={reverse.isPending}
+                    onClick={() => {
+                      reverse.mutate({ id: row.id, note, tbl: row.tbl }, {
+                        onSuccess: () => { toast('Back in the queue.'); setUndoing(false); setNote('') },
+                        onError: (e) => toast(e instanceof Error ? e.message : 'Couldn’t undo this decision.'),
+                      })
+                    }}
+                  >
+                    Undo
+                  </PrimaryButton>
+                </>
+              }
+            >
+              <p className="m-0 mb-3 text-[13px] text-sec">
+                {tab === 'approved'
+                  ? `The ${row.action === 'create' ? 'record this posted is removed' : row.action === 'delete' ? 'deleted record is put back' : 'edit this posted is reversed'}, and the input goes back to Pending for a fresh decision. If anyone has changed the record since, the undo is refused and you will be told who.`
+                  : 'The input goes back to Pending for a fresh decision. Nothing was posted, so nothing else changes.'}
+              </p>
+              <Field label="Reason" hint="Optional. Goes to the submitter and into the history.">
+                <Input value={note} placeholder="Approved the wrong line…" onChange={(e) => setNote(e.target.value)} />
+              </Field>
+            </Dialog>
+          </span>
+        ) : mine ? (
+          <GhostButton onClick={() => withdraw.mutate(row.id)}>Withdraw</GhostButton>
+        ) : (
+          <span className="text-[12px] text-faint">Waiting</span>
         )}
-        {/* Approving needs no explanation; rejecting does. The row's ✕ asks for
-            one rather than discarding someone's work on a single click - and
-            the reason reaches the submitter with the decision, which is the
-            difference between "not approved" and something they can act on. */}
+      </td>
+    </tr>
+    {open && (
+      <ApprovalDrawer row={row} canDecide={canDecideThis} onClose={() => setOpen(false)} />
+    )}
+    {/* Approving needs no explanation; rejecting does. The row's ✕ asks for
+        one rather than discarding someone's work on a single click - and
+        the reason reaches the submitter with the decision, which is the
+        difference between "not approved" and something they can act on. */}
         <Dialog
           open={rejecting}
           title="Reject this input"
@@ -254,44 +323,7 @@ function Row({ row, mayApprove, mine, tab }: {
             />
           </Field>
         </Dialog>
-      </td>
-
-      <td className={`${td} text-right`}>
-        {canDecideThis ? (
-          <span className="flex items-center justify-end gap-[6px]">
-            <button
-              type="button"
-              title="Reject"
-              aria-label="Reject"
-              onClick={() => setRejecting(true)}
-              className="flex h-[26px] w-[26px] cursor-pointer items-center justify-center rounded-[6px] border border-inputline bg-white text-mut transition-colors hover:border-redf hover:text-redtext"
-            >
-              <X size={14} strokeWidth={2} />
-            </button>
-            <button
-              type="button"
-              title="Approve"
-              aria-label="Approve"
-              onClick={() => decide.mutate({ id: row.id, decision: 'approve', tbl: row.tbl })}
-              className="flex h-[26px] w-[26px] cursor-pointer items-center justify-center rounded-[6px] border border-ink bg-ink text-white transition-colors hover:bg-inkhov"
-            >
-              <Check size={14} strokeWidth={2} />
-            </button>
-          </span>
-        ) : tab !== 'pending' ? (
-          <span
-            title={tab === 'approved' ? 'Approved' : 'Rejected'}
-            className={`inline-flex h-[26px] w-[26px] items-center justify-center ${tab === 'approved' ? 'text-sec' : 'text-redtext'}`}
-          >
-            {tab === 'approved' ? <Check size={14} strokeWidth={2} /> : <X size={14} strokeWidth={2} />}
-          </span>
-        ) : mine ? (
-          <GhostButton onClick={() => withdraw.mutate(row.id)}>Withdraw</GhostButton>
-        ) : (
-          <span className="text-[12px] text-faint">Waiting</span>
-        )}
-      </td>
-    </tr>
+    </>
   )
 }
 

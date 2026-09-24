@@ -3,17 +3,16 @@ import { useToast } from '../../components/Toast'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useTables } from '../../lib/data'
 import { repos } from '../../data/repo'
-import { useRange } from '../../lib/range'
-import { RangePicker } from '../../lib/range'
-import {
-  inRange, isInstallmentOverdue, openReceivables, saleInstallmentEntries,
-} from '../../lib/metrics'
+import { isInstallmentOverdue, openReceivables, unsettledReceivables } from '../../lib/metrics'
+import { isCashDeskWork } from '../../lib/collectionStatus'
+import PaymentPath from '../../components/PaymentPath'
 import { todayISO, fmtCompactPeso } from '../../lib/format'
-import { InfoTip, KpiStrip, PageHeader } from '../../components/ui'
+import { InfoTip, KpiStrip, PageHeader, PageSkeleton } from '../../components/ui'
 import QueueTab from './QueueTab'
 import SettleDialog from './SettleDialog'
 import { PendingBanner } from '../settings/Approvals'
 import { isPending } from '../../lib/approvals'
+import { usePendingRecord } from '../../lib/deepLink'
 import { rateOverall } from '../../lib/collection'
 import type { Sale } from '../../data/types'
 import CalendarTab from './CalendarTab'
@@ -56,15 +55,32 @@ export default function Collection({ page }: { page: Page }) {
   function showQueueFor(collectorId: string | null) {
     navigate(`/collection?collector=${collectorId ?? 'none'}`)
   }
-  const { range } = useRange()
   /** The installment being settled - Exhibit A 1.6 wants a reference number, a
    * receiving account and a reason, none of which fit on a one-click button. */
-  const [settling, setSettling] = useState<{ sale: Sale; installment: SaleInstallment } | null>(null)
+  const [settling, setSettling] = useState<
+    { sale: Sale; installment: SaleInstallment; preset?: CollectionStatus } | null
+  >(null)
   const toast = useToast()
 
+  const [pendingRecord, clearPendingRecord] = usePendingRecord()
+
   const data = useTables(['sales', 'customers', 'personnel', 'bankAccounts', 'agents'] as const)
-  if (!data) return null
+  if (!data) return <PageSkeleton />
   const { sales, customers, personnel, bankAccounts, agents } = data
+
+  // A dashboard click asked for one installment ("saleId::installmentId") or,
+  // from older links, a sale - in which case its first open installment is
+  // the one meant. Cleared unconditionally: a record deleted since the link
+  // was drawn must not leave the id retrying on every render.
+  if (pendingRecord) {
+    const [saleId, instId] = pendingRecord.split('::')
+    const sale = sales.find((s) => s.id === saleId)
+    const installment = instId
+      ? sale?.installments.find((i) => i.id === instId)
+      : sale?.installments.find((i) => i.status === 'pending')
+    clearPendingRecord()
+    if (sale && installment && !settling) setSettling({ sale, installment })
+  }
 
   /** Updates one installment inside its parent sale's array - never the whole plan. Marking
    * collected stamps collectedAt (for "collected this period"); leaving collected clears it. */
@@ -88,20 +104,42 @@ export default function Collection({ page }: { page: Page }) {
     if (sale && installment) setSettling({ sale, installment })
   }
 
+  /**
+   * A drag on the board, or the cancel action on a row, asks for an outcome -
+   * it doesn't record one.
+   *
+   * This used to write the status straight through, which meant the two ways
+   * of concluding a collection disagreed: the Settle button asked for the date
+   * the money arrived, the reason a check bounced and the slip it came on,
+   * while a drag into the same column asked for nothing and stamped today's
+   * date. So the board quietly produced the records the dialog exists to
+   * prevent. Now both roads lead to the dialog; the drag only decides which
+   * outcome it opens on.
+   */
   function moveInstallment(saleId: string, installmentId: string, status: CollectionStatus) {
-    void patchInstallment(saleId, installmentId, (i) => ({
-      ...i,
-      status,
-      collectedAt: status === 'collected' ? new Date().toISOString() : undefined,
-    }))
+    const sale = sales.find((s) => s.id === saleId)
+    const installment = sale?.installments.find((i) => i.id === installmentId)
+    if (sale && installment) setSettling({ sale, installment, preset: status })
   }
 
   function assignCollector(saleId: string, installmentId: string, collectorId: string | null) {
     void patchInstallment(saleId, installmentId, (i) => ({ ...i, collectorId: collectorId ?? undefined }))
   }
 
+  /**
+   * Collect's figures are about getting hold of the money, and nothing after.
+   *
+   * This strip used to carry Outstanding, In hand and Cleared as well - three
+   * figures from further down the road, which is Treasury's stretch - and the
+   * result was two modules that looked like they did the same job. Now the
+   * only Treasury number here is the one card that says how much has left the
+   * collectors' hands and not yet settled, because that is the handoff, and
+   * the handoff is the one thing both desks need to see.
+   */
   const open = openReceivables(sales)
-  const outstanding = open.reduce((sum, e) => sum + e.installment.amount, 0)
+  const toCollect = open.reduce((sum, e) => sum + e.installment.amount, 0)
+  const handedOver = unsettledReceivables(sales).filter((e) => isCashDeskWork(e.installment.status))
+  const handedOverAmt = handedOver.reduce((sum, e) => sum + e.installment.amount, 0)
   const overdueAmt = open
     .filter((e) => isInstallmentOverdue(e.installment))
     .reduce((sum, e) => sum + e.installment.amount, 0)
@@ -115,11 +153,6 @@ export default function Collection({ page }: { page: Page }) {
     })
     .reduce((sum, e) => sum + e.installment.amount, 0)
 
-  const collectedInRange = saleInstallmentEntries(sales)
-    .filter((e) => e.installment.status === 'collected'
-      && inRange(e.installment.collectedAt ?? e.installment.dueDate, range))
-    .reduce((sum, e) => sum + e.installment.amount, 0)
-
   const overall = rateOverall(sales)
   const pctText = (v: number | null) => (v === null ? '—' : `${Math.round(v * 100)}%`)
 
@@ -127,44 +160,89 @@ export default function Collection({ page }: { page: Page }) {
     <>
       {/* Secondary Feature 2.1 - staff see their own parked inputs where they work. */}
       <PendingBanner tbl="sales" />
+      {/* No period picker here any more: nothing on this desk is a "this
+          month" figure. What is due is due, and what cleared in a period is
+          Treasury's number, on Treasury's page. */}
       <PageHeader
         title={PAGE_TITLES[page]}
-        right={<RangePicker />}
+        subtitle={(
+          <span className="inline-flex items-center gap-[6px]">
+            Getting hold of what customers owe. Once it is in hand, Treasury banks it.
+            {/* The road a payment travels is a legend, not a dashboard: read
+                once, then in the way. It lives behind the ⓘ here and is drawn
+                in full, lit, on every dialog that moves a payment. */}
+            <InfoTip label="How a payment moves">
+              <PaymentPath desk="collection" size="sm" className="mb-[8px]" />
+              Collect gets it as far as in hand. Depositing and clearing are Treasury’s, on their own page.
+            </InfoTip>
+          </span>
+        )}
       />
 
       <div className="mb-[18px]">
         <KpiStrip
           delay={50}
           items={[
-            { label: 'Outstanding', value: fmtCompactPeso(outstanding), sub: <span>{open.length} open installments</span> },
+            {
+              label: 'To collect',
+              value: fmtCompactPeso(toCollect),
+              tip: {
+                label: 'What counts here',
+                body: (
+                  <>
+                    Payments nobody has gone and got yet. Once a collector records one as in
+                    hand it leaves this figure and becomes Treasury's to bank - see the card
+                    to the right.
+                  </>
+                ),
+              },
+              sub: <span>{open.length} payment{open.length === 1 ? '' : 's'}</span>,
+            },
             {
               label: 'Overdue',
               value: <span className={overdueAmt > 0 ? 'text-redtext' : undefined}>{fmtCompactPeso(overdueAmt)}</span>,
-              // The two cards print the same figure whenever every peso is late,
-              // which on this book they are. The share says which case you are
-              // looking at instead of leaving one card repeating the other.
-              sub: outstanding > 0
-                ? <span>{Math.round((overdueAmt / outstanding) * 100)}% of outstanding</span>
+              sub: toCollect > 0
+                ? <span>{Math.round((overdueAmt / toCollect) * 100)}% of to collect</span>
                 : undefined,
             },
             // fmtCompactPeso renders a plain zero as "₱0.00", which is the only
             // figure on the strip carrying centavos. Nothing is due; say so.
             { label: 'Due in 7 days', value: dueSoon > 0 ? fmtCompactPeso(dueSoon) : '—' },
-            { label: 'Collected this period', value: fmtCompactPeso(collectedInRange) },
+            // The handoff. Everything a collector has taken off a customer
+            // that the bank has not yet paid out on. It is not this desk's
+            // work any more, which is exactly why it is shown: the money is
+            // out of the collector's hands and not yet in the account.
+            {
+              label: 'With Treasury',
+              value: handedOverAmt > 0 ? fmtCompactPeso(handedOverAmt) : '—',
+              to: '/treasury',
+              tip: {
+                label: 'Where this went',
+                body: (
+                  <>
+                    Collected, and now Treasury's to deposit and clear. The customer still owes
+                    it until the bank clears it, so it stays on their balance - which is why a
+                    bounce needs no reversal. Open Treasury to see it banked.
+                  </>
+                ),
+              },
+              sub: handedOver.length > 0 ? <span>{handedOver.length} item{handedOver.length === 1 ? '' : 's'}</span> : undefined,
+            },
             // Exhibit A 1.6 - "percentage collected on time … in aggregate".
             {
-              label: (
-                <span className="inline-flex items-center gap-[5px]">
-                  Collected on time
-                  {overall.settled > overall.judged && (
-                    <InfoTip label="Why the on-time figure is incomplete">
-                      {overall.settled - overall.judged} collection
-                      {overall.settled - overall.judged === 1 ? '' : 's'} have no date recorded, so they sit
-                      outside this figure. Settle one and set the date to include it.
-                    </InfoTip>
-                  )}
-                </span>
-              ),
+              label: 'Collected on time',
+              // Only when there is something to explain: collections with no
+              // date sit outside the figure.
+              tip: overall.settled > overall.judged ? {
+                label: 'Why the on-time figure is incomplete',
+                body: (
+                  <>
+                    {overall.settled - overall.judged} collection
+                    {overall.settled - overall.judged === 1 ? '' : 's'} have no date recorded, so they sit
+                    outside this figure. Settle one and set the date to include it.
+                  </>
+                ),
+              } : undefined,
               value: pctText(overall.onTimeRate),
               sub: (
                 <span>
@@ -184,7 +262,7 @@ export default function Collection({ page }: { page: Page }) {
         />
       )}
       {page === 'calendar' && (
-        <CalendarTab sales={sales} customers={customers} personnel={personnel} onMove={moveInstallment} />
+        <CalendarTab sales={sales} customers={customers} personnel={personnel} />
       )}
       {page === 'balances' && <BalancesTab sales={sales} customers={customers} personnel={personnel} />}
       {page === 'collectors' && (
@@ -193,6 +271,7 @@ export default function Collection({ page }: { page: Page }) {
 
       <SettleDialog
         entry={settling}
+        sales={sales}
         customers={customers}
         personnel={personnel}
         bankAccounts={bankAccounts}

@@ -9,7 +9,7 @@ import { RECORD_PARAM, recordHref } from './deepLink'
 describe('recordHref', () => {
   it('points each table at the module that owns it', () => {
     expect(recordHref('sales', 'abc')).toBe(`/sales?${RECORD_PARAM}=abc`)
-    expect(recordHref('purchases', 'abc')).toBe(`/inventory?${RECORD_PARAM}=abc`)
+    expect(recordHref('purchases', 'abc')).toBe(`/inventory/purchases?${RECORD_PARAM}=abc`)
     expect(recordHref('deliveries', 'abc')).toBe(`/logistics?${RECORD_PARAM}=abc`)
     expect(recordHref('customers', 'abc')).toBe(`/accounts?${RECORD_PARAM}=abc`)
   })

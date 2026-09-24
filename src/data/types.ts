@@ -11,6 +11,12 @@ export interface Supplier extends Base {
   contactPerson: string
   contactNumber: string
   address: string
+  /** The supplier's sales agent for MPower's account, and how to reach them. */
+  agentName?: string
+  agentContact?: string
+  /** The supplier depot MPower loads from, when it differs from the office address. */
+  depotName?: string
+  depotAddress?: string
   /** Standing credit term with this supplier, in days - a new purchase's due date
    * auto-fills to the purchase date plus this many days (0 = pay on delivery). */
   paymentTermDays: number
@@ -388,14 +394,51 @@ export interface Truck extends Base {
   plateNumber: string
   capacityLiters: number
   assignedDriverId?: ID
+  /**
+   * Gross vehicle weight in kilograms. The Metro Manila truck ban applies
+   * above 4,500 kg; a truck with this blank is treated as heavy until someone
+   * fills it in, because a fuel tanker nearly always is and a missed warning
+   * costs more than a spare one. See lib/numberCoding.ts.
+   */
+  gvwKg?: number
+  /** Empty weight, kg, for the overloading check (lib/vehicleLimits.ts). */
+  tareKg?: number
+  /** Axle configuration code, which sets the legal gross weight. */
+  axleConfig?: string
+  /** A legal gross weight typed by hand, overriding the axle code's. */
+  maxGvwKg?: number
+  /** Tollway class 1-3; blank is read as 3 for a heavy truck. */
+  tollClass?: 1 | 2 | 3
 }
 
 export type PurchaseStatus = 'ordered' | 'received'
 export type PaymentMode = 'cash' | 'check' | 'bank_transfer'
-/** Exhibit A 1.6: "pending, collected, bounced for post-dated checks, or
- * cancelled, with overdue status derived from elapsed due dates". Overdue is
- * deliberately absent - it is computed, never stored. */
-export type CollectionStatus = 'pending' | 'collected' | 'bounced' | 'cancelled'
+/**
+ * Where one payment has got to, from promised to actually in the bank.
+ *
+ * Exhibit A 1.6 asked for "pending, collected, bounced for post-dated checks,
+ * or cancelled". That is the right list for cash, and one state short for a
+ * check. A post-dated check passes through three separate custodies before it
+ * is money: the collector holds it, the bank holds it, and only then is it
+ * spendable - and it can still be refused at the last step. Collapsing those
+ * into "collected" meant the collections figure counted paper that might never
+ * become pesos, nothing showed what was sitting undeposited in a drawer, and a
+ * bounce surfaced weeks after the collection it contradicted.
+ *
+ * So the chain is: pending (owed) → collected (in hand, with whoever collected
+ * it) → deposited (lodged, waiting on the bank) → cleared (money). `bounced`
+ * can follow deposited, and - for a check the bank never saw - collected.
+ * `cleared` is the only state that settles the receivable.
+ *
+ * Cash and bank transfers skip the middle: received is cleared, in one step,
+ * because there is no instrument to hold or present. Only checks walk the
+ * whole chain.
+ *
+ * Overdue is deliberately absent from the list - it is computed from an
+ * elapsed due date, never stored.
+ */
+export type CollectionStatus =
+  | 'pending' | 'collected' | 'deposited' | 'cleared' | 'bounced' | 'cancelled'
 /** Same three-state shape as CollectionStatus, just named for money going out instead of
  * coming in: pending → paid, or cancelled. */
 export type PurchasePaymentStatus = 'pending' | 'paid' | 'cancelled'
@@ -424,10 +467,38 @@ export interface SaleInstallment {
   /** Receiving bank account override for this installment; blank falls back to the sale's
    * `bankAccountId` - resolve via installmentBankAccount() in metrics.ts. */
   bankAccountId?: ID
-  /** ISO timestamp set when the installment is marked collected (cleared on un-collect) -
-   * "collected this period" reporting reads this, falling back to dueDate for records
-   * collected before this field existed. */
+  /**
+   * ISO timestamp set when the payment came into the collector's hands.
+   *
+   * This is the collector's date: their job ends here, so the on-time rate is
+   * judged on it. It is NOT when the money arrived in the bank - see
+   * `clearedAt` for that. Falls back to dueDate for records written before the
+   * two were told apart.
+   */
   collectedAt?: string
+  /**
+   * The date written on a post-dated check - when it may be presented.
+   *
+   * The answer to "due for collection or due for depositing?": they are two
+   * different dates and the record only ever held the first. The collection
+   * due date says when the customer must hand something over; this says when
+   * that something becomes bankable, which can be weeks later. The treasury's
+   * deposit queue is ordered by it.
+   */
+  checkDate?: string
+  /** ISO timestamp Treasury lodged this with the bank. */
+  depositedAt?: string
+  /** Seat that recorded the deposit - deliberately not the collector's, which
+   *  is the whole point of Treasury being a separate permission. */
+  depositedBy?: ID
+  /** The bank's deposit slip number, as printed on the slip. Distinct from
+   *  `referenceNo`, which is the customer's check number. */
+  depositSlipNo?: string
+  /** ISO timestamp the funds actually became available. The receivable is
+   *  settled here and nowhere earlier; "collected this period" counts on it. */
+  clearedAt?: string
+  /** Seat that confirmed clearing. */
+  clearedBy?: ID
   /** Reference number of the deposit slip or check (Exhibit A 1.3, 1.6). For a
    * post-dated check this is the check number; for a bank transfer, the deposit
    * slip reference. The scanned copy is an attachment on the sale. */
@@ -448,6 +519,24 @@ export interface PurchaseInstallment {
   interestPct: number
   dueDate: string
   status: PurchasePaymentStatus
+  /** Check number or deposit-slip reference, as on the sales side. */
+  referenceNo?: string
+  /** Why it was paid late, or not at all. */
+  notes?: string
+  /** ISO timestamp Treasury released the money. */
+  paidAt?: string
+  /** Seat that paid it. Money out is the same custody question as money in:
+   *  worth knowing whose hands it left by. */
+  paidBy?: ID
+  /** Account the payment went out of. */
+  bankAccountId?: ID
+  /** Name of the seat that paid it, kept on the record the way a trip's
+   *  stamps keep theirs, so the history reads without a seats lookup that
+   *  a treasurer may not be allowed to make. */
+  paidByName?: string
+  /** How it went out: a check, a transfer, cash. The purchase carries the
+   *  agreed mode; this is what was actually used for this installment. */
+  paymentMode?: PaymentMode
 }
 
 export interface Purchase extends Base {
@@ -456,8 +545,12 @@ export interface Purchase extends Base {
   pricePerLiter: number
   /** Volume ordered. */
   volumeLiters: number
-  fulfillment: 'pickup' | 'delivered'
+  /** 'hauler': a third party trucks it in, recorded in `hauler`. */
+  fulfillment: 'pickup' | 'delivered' | 'hauler'
   address?: string
+  /** The third-party hauler, when fulfillment is 'hauler'. Typed per purchase;
+   * there is no haulers master list. */
+  hauler?: PurchaseHauler
   warehouseId: ID
   status: PurchaseStatus
   paymentMode: PaymentMode
@@ -487,6 +580,39 @@ export interface Purchase extends Base {
   /** Which product this purchase brought in - blank means the default product.
    * See the Product comment below. */
   productId?: ID
+  /** The product's name when productId is OTHER_PRODUCT_ID - "Kerosene", say. */
+  productLabel?: string
+}
+
+/**
+ * A third-party hauler kept on file, so the purchase form fills itself in
+ * from a pick rather than the same name, number and fee typed on every load.
+ * Managed under Admin & settings; a purchase still carries its own copy of
+ * the details (PurchaseHauler), so editing the hauler later does not rewrite
+ * history.
+ */
+export interface Hauler extends Base {
+  name: string
+  contactPerson?: string
+  contactNumber?: string
+  address?: string
+  /** What they usually charge for a run - the form's starting fee. */
+  defaultFee?: number
+  paymentMode?: PaymentMode
+  notes?: string
+}
+
+export interface PurchaseHauler {
+  /** The saved hauler this was filled from, when it was. */
+  haulerId?: ID
+  name: string
+  contact?: string
+  /** When the hauler picks up from the supplier. */
+  date?: string
+  /** What the hauler charges for the run. */
+  fee: number
+  paymentMode: PaymentMode
+  status: 'unpaid' | 'paid'
 }
 
 export type SaleStatus = 'draft' | 'confirmed' | 'fulfilled' | 'cancelled' | 'returned'
@@ -496,27 +622,46 @@ export type SaleStatus = 'draft' | 'confirmed' | 'fulfilled' | 'cancelled' | 're
  * `status !== 'draft'`. */
 export const CONSUMING_SALE_STATUSES: readonly SaleStatus[] = ['confirmed', 'fulfilled'] as const
 
-/** How a cancelled or returned order is settled (Exhibit A 1.3 "with reason and
- * treatment"). */
+/**
+ * How the money on a cancelled or returned order is settled (Exhibit A 1.3
+ * "with reason and treatment").
+ *
+ * This is the money side only. Whether the fuel physically came back into the
+ * depot is `OrderResolution.backToStock`, a separate question: a rejected load
+ * can be refunded AND come back, or be refunded and be lost. Net sales are the
+ * same either way - an order that was returned comes off sales in full,
+ * whatever was done about the money - which is the accounting the client
+ * follows: net sales = sales less returns and allowances.
+ *
+ * `restocked` and `written_off` are legacy values from when this field carried
+ * both questions. They are still read (a stored `restocked` means the fuel came
+ * back) but no longer offered.
+ */
 export type OrderTreatment =
-  | 'restocked'        // volume returned to the warehouse
-  | 'refunded'         // money returned to the customer
+  | 'refunded'         // money already collected goes back to the customer
   | 'credit_note'      // held as credit against future orders
-  | 'replaced'         // re-delivered instead of refunded
-  | 'written_off'      // absorbed as a loss
-  | 'no_action'
+  | 'replaced'         // re-delivered under a new order
+  | 'no_action'        // nothing collected yet - the receivable is simply cancelled
+  | 'restocked'        // legacy: fuel came back (now backToStock)
+  | 'written_off'      // legacy: fuel lost, nothing recovered
 
 export interface OrderResolution {
   /** ISO date the cancellation or return was recorded. */
   date: string
   reason: string
   treatment: OrderTreatment
+  /** For a return: did the fuel come back into the depot, sellable again?
+   * Drives stock on hand and nothing else - net sales are netted regardless.
+   * Blank on a legacy record: read `treatment === 'restocked'` instead. */
+  backToStock?: boolean
   /** The status the order held before it was cancelled or returned. Recorded so
    * "Revert" can put it back where it was - without this the System would have
    * to guess between draft, confirmed and fulfilled, and a mis-click would be
    * unrecoverable. */
   previousStatus?: SaleStatus
-  /** Volume coming back into stock, for a partial return. Blank = the whole order. */
+  /** Volume returned, for a partial return. Blank = the whole order. This is
+   * the volume that comes off net sales; whether it also re-enters stock is
+   * `backToStock`. */
   volumeReturned?: number
   recordedBy?: ID
   notes?: string
@@ -552,6 +697,22 @@ export interface Sale extends Base {
   /** Set when status is 'cancelled' or 'returned' (Exhibit A 1.3). */
   resolution?: OrderResolution
   productId?: ID
+  /** The product's name when productId is OTHER_PRODUCT_ID - "Kerosene", say.
+   *  Mirrors the same field on Purchase; without it a sale of a one-off
+   *  product had nowhere to keep its name, and the movement detail that reads
+   *  it showed the default product for everything. */
+  productLabel?: string
+  /** The company's own sales invoice number for this order, once issued. */
+  invoiceNo?: string
+  /** Credit terms in days: 0 is cash or COD, blank means the customer's
+   *  standing term applied. What the collection plan's due dates follow. */
+  termDays?: number
+  /** Where and to whom the fuel goes, copied from the customer when the
+   *  sale is booked so a later change to the customer's card does not
+   *  rewrite an order already agreed. The delivery is built from these. */
+  contactPerson?: string
+  contactNumber?: string
+  deliveryAddress?: string
 }
 
 export type DeliveryStatus = 'scheduled' | 'loading' | 'in_transit' | 'delivered' | 'failed'
@@ -593,21 +754,47 @@ export interface PreDispatchChecklist {
   guardId?: ID
   managerId?: ID
   allowanceIssued?: number
-  identificationVerified: boolean
-  loadConfirmed: boolean
+  // Vehicle - BLOWBAGETS, the LTO's pre-trip inspection mnemonic.
+  batteryChecked?: boolean
+  lightsChecked?: boolean
+  oilChecked?: boolean
+  waterChecked?: boolean
+  brakesChecked?: boolean
+  airChecked?: boolean
+  /** Gas: the truck's own fuel. `fullTankConfirmed` is the older name for the same tick. */
+  fullTankConfirmed: boolean
+  engineInspected: boolean
+  tiresInspected: boolean
+  /** Self: the driver is fit to drive. */
+  driverFit?: boolean
+  partsInspected: boolean
+  // Devices
   gpsPresent: boolean
   fuelSensorPresent: boolean
   smartLockPresent: boolean
-  fullTankConfirmed: boolean
-  engineInspected: boolean
-  partsInspected: boolean
-  tiresInspected: boolean
   bodyCamPresent: boolean
+  // Documents and cash
+  identificationVerified: boolean
+  driverLicenseChecked?: boolean
+  receiptOnBoard?: boolean
+  tollCardsOnBoard?: boolean
+  allowanceHanded?: boolean
+  // Load
+  loadConfirmed: boolean
+  /** The crew signing the slip on screen. Keyed by role. */
+  signatures?: Partial<Record<'driver' | 'pahinante' | 'dispatcher', ChecklistSignature>>
   completedBy?: ID
   completedAt?: string
   notes?: string
   /** Allocated from the PDC series when the checklist is printed. */
   referenceNo?: string
+}
+
+/** A signature drawn on screen: a small PNG data URL, who drew it, and when. */
+export interface ChecklistSignature {
+  name: string
+  image: string
+  at: string
 }
 
 /** A reference number staff typed in, paired with the attachment holding its
@@ -652,6 +839,31 @@ export type TripStage = 'plan' | 'dispatch' | 'delivery' | 'close'
  * crew are ever given seats of their own, `by` becomes the crew member and this
  * field stops being written rather than the model having to change.
  */
+export interface TravelEstimate {
+  /** One-way drive from the depot, in minutes, for the route chosen. */
+  minutesOneWay: number
+  km: number
+  provider: 'google' | 'osrm'
+  from: string
+  to: string
+  at: string
+  /** The road the chosen route mostly follows - "via SLEX". */
+  summary?: string
+  /** Which of the offered routes was picked, 0 = fastest. */
+  routeIndex?: number
+  /** Minutes allowed at the customer to unload, as set in the planner. */
+  unloadMinutes?: number
+  /** The named places the route goes through (lib/zones.ts), so the city
+   *  bans and tollway limits can be checked against it. */
+  zones?: string[]
+}
+
+/** A point on the map, picked or geocoded. */
+export interface GeoPoint {
+  lat: number
+  lng: number
+}
+
 export interface StageStamp {
   by?: ID
   byName?: string
@@ -687,6 +899,18 @@ export interface Delivery extends Base {
   requestedTime?: string
   /** Time of day on the final schedule, "HH:mm". */
   scheduleTime?: string
+  /** How long the truck is taken up by this trip, in hours - out, unload and
+   * back. Blank means the fleet default (TRIP_BLOCK_HOURS). Drives the
+   * By-truck board, the clash check and the day strip. */
+  durationHours?: number
+  /** A drive-time estimate fetched for the delivery address, kept so the
+   * figure the duration was set from is on the record, not just in someone's
+   * head. */
+  travelEstimate?: TravelEstimate
+  /** Where the address is on the map, once someone has placed it - by
+   * geocoding or by dropping the pin. Reused by the next estimate, and the
+   * more exact answer when the address text is vague. */
+  destination?: GeoPoint
   managerId?: ID
   /** ETA entered and maintained by Logistics staff (Exhibit A 1.1). The
    * automatically computed ETA from live vehicle position is (D) and depends on
@@ -737,6 +961,21 @@ export interface VehicleMaintenance extends Base {
  * question (see Q12 in the gap analysis), so the table ships empty.
  */
 export interface TruckBanRule extends Base {
+  /**
+   * Set on the rules the app generates from the regulations it knows
+   * (lib/numberCoding.ts) rather than ones an administrator typed. Never
+   * stored: built-in rules are computed on the way in, and the only thing
+   * saved about them is whether each preset is switched on (appSettings).
+   */
+  builtin?: string
+  /** 'heavy' limits the rule to trucks over the truck-ban weight, 'light' to
+   *  those at or under it; blank or 'all' applies it to every truck. */
+  appliesTo?: 'all' | 'heavy' | 'light'
+  /** Number coding is lifted on holidays; a truck ban is not. */
+  suspendedOnHolidays?: boolean
+  /** A zone key (lib/zones.ts) the rule is confined to: it applies only to
+   *  a trip whose planned route goes through it. */
+  zone?: string
   /** Which local government unit or authority the rule comes from, e.g. 'MMDA'. */
   authority: string
   area: string
@@ -757,6 +996,16 @@ export interface Setting {
   value: string
 }
 
+/**
+ * One piece of system configuration that is not a business record, stored in
+ * the admin-only `appSettings` table as a keyed document. Number coding
+ * presets live here under key 'numberCoding' (lib/numberCoding.ts).
+ */
+export interface AppSetting extends Base {
+  key: string
+  value: unknown
+}
+
 // ---- Product catalog ---------------------------------------------------------
 //
 // The System was built single-product (diesel, measured in liters). Secondary
@@ -768,6 +1017,11 @@ export interface Setting {
 // catalog is already here.
 
 export const DEFAULT_PRODUCT_ID = 'product-diesel'
+/** Built-in products beside diesel, offered on every form without catalogue setup. */
+export const GASOLINE_PRODUCT_ID = 'product-gasoline'
+export const LPG_PRODUCT_ID = 'product-lpg'
+/** "Other": the record carries its own `productLabel`. */
+export const OTHER_PRODUCT_ID = 'product-other'
 
 export interface Product extends Base {
   name: string
@@ -797,7 +1051,14 @@ export interface StockThreshold extends Base {
 /** Per-user to-do list (Exhibit A 1.1). Kept deliberately thin - a note, a due
  * date, and an optional link to the record it is about. */
 export interface Todo extends Base {
+  /** Whose list it is on. */
   seatId: ID
+  /**
+   * Set by the server when an administrator or approver put this on somebody
+   * else's list. The assigner can still see and remove it; nobody else can.
+   */
+  assignedById?: ID
+  assignedByName?: string
   text: string
   done: boolean
   dueDate?: string
@@ -819,7 +1080,6 @@ export type DashboardWidget =
   | 'recentTransactions'
   | 'todos'
   | 'incoming'
-  | 'cashFlow'
   | 'receivables'
   | 'deliveryBoard'
   | 'announcements'
@@ -931,7 +1191,17 @@ export interface DrugTest extends Base {
 }
 
 /** The screens a seat can be granted. Mirrors the nav rail one-to-one. */
-export type ModuleKey = 'dashboard' | 'inventory' | 'sales' | 'collection' | 'accounts' | 'logistics' | 'hr' | 'settings'
+/**
+ * One entry per screen in the nav rail, and per checkbox on a seat.
+ *
+ * `treasury` (Treasury) is deliberately its own key rather than a page
+ * inside `collection`. Receiving money and banking it are the two halves of
+ * the oldest control in bookkeeping: if one person does both, covering a theft
+ * with the next customer's payment leaves no trace. Separate keys are what let
+ * a seat hold one without the other; a page inside Collect would have shared
+ * its permission and made the separation cosmetic.
+ */
+export type ModuleKey = 'dashboard' | 'inventory' | 'sales' | 'collection' | 'treasury' | 'accounts' | 'logistics' | 'hr' | 'settings'
 
 /** A login seat - a person who can sign into the app. Admin seats can manage other
  * seats and see every module; everyone else sees only the modules ticked for them.
@@ -954,4 +1224,32 @@ export interface Seat extends Base {
    * approval. Escape hatch for a trusted encoder; blank means the table's own
    * approval rule applies. */
   bypassApproval?: boolean
+
+  /**
+   * The employee this login is.
+   *
+   * Office seats leave it blank - they act for the business rather than as one
+   * person. A field seat must carry it: it is how a trip knows the pahinante
+   * opening it is crewed on it, how a sale knows which agent sold it, and how a
+   * stage stamp records the person and not just the account.
+   */
+  personnelId?: ID
+
+  /**
+   * How much of their module this seat sees.
+   *
+   * 'all' (or blank) is the office: the whole business, as before. 'own' is a
+   * field seat - their trips, their sales, their collections - enforced on the
+   * server, not merely defaulted in the UI. See server/scope.ts.
+   */
+  scope?: 'own' | 'all'
+
+  /**
+   * The Agent record a sales seat sells under - resolved by the server from the
+   * employee's row when the session loads, never stored on the seat.
+   *
+   * The client cannot read it from `personnel` itself: `Personnel.agentId` is
+   * an HR field, stripped from the employee row for any seat without HR access.
+   */
+  agentId?: ID
 }

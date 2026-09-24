@@ -199,25 +199,122 @@ function pickInstallmentCount(): number {
  * in one installment. Collected installments carry collectedAt (a day or two past due) so
  * "collected this period" reporting has real timestamps; some later installments of a split
  * plan get their own collector override to exercise the installment-level assignment. */
-function makeSaleInstallments(day: number, total: number, paymentMode: Sale['paymentMode'], customer: Customer, collectors: Personnel[]): SaleInstallment[] {
+function makeSaleInstallments(day: number, total: number, paymentMode: Sale['paymentMode'], customer: Customer, collectors: Personnel[], bankAccounts: BankAccount[]): SaleInstallment[] {
   // No interest in the demo data - principal is the whole amount. Interest is something
   // a person adds by hand in the installment builder.
+  // Cash never walks the custody chain: handing it over and it being money are
+  // the same event, so it goes straight to cleared.
   if (paymentMode === 'cash') {
-    return [{ id: nanoid(8), amount: total, principal: total, interestPct: 0, dueDate: daysAgo(day), status: 'collected', collectedAt: daysAgo(day) }]
+    return [{
+      id: nanoid(8), amount: total, principal: total, interestPct: 0, dueDate: daysAgo(day),
+      status: 'cleared', collectedAt: daysAgo(day), clearedAt: daysAgo(day),
+    }]
   }
   const n = pickInstallmentCount()
   return splitAmount(total, n).map((amount, k) => {
     const due = day - (customer.paymentTermDays + k * 15)
+    const isCheck = paymentMode === 'check'
     const cancelled = rand() < 0.05
-    const status: SaleInstallment['status'] = cancelled ? 'cancelled' : due > 10 ? 'collected' : 'pending'
+    // Only a check can bounce - a bank transfer either lands or doesn't - and
+    // only one that has already been presented.
+    const bounced = !cancelled && isCheck && due > 10
+      && rand() < (shakyPayer(customer.company) ? 0.4 : 0.03)
+
+    /**
+     * How far along the chain this one has got.
+     *
+     * The demo has to contain all of it or Treasury opens empty and the
+     * distinction the client asked about can't be seen: checks in a drawer,
+     * checks at the bank, checks that cleared, and - the case that prompted
+     * all this - a post-dated check already collected weeks before its own
+     * date, which cannot be deposited yet however overdue it looks.
+     */
+    const settled = !cancelled && !bounced && due > 10
+    const roll = rand()
+    /**
+     * Clearing takes a few banking days, not months.
+     *
+     * Rolling "in clearing" evenly across every settled item left checks
+     * apparently sitting at the bank for two months, which is not a slow
+     * deposit - it is a record somebody forgot to close, and the demo should
+     * not be full of them. So only recently-banked items are still waiting;
+     * anything older has long since cleared. A few stay in hand at any age,
+     * because a check nobody ever took to the bank is a real thing and the
+     * queue that catches it is the point of the screen.
+     */
+    const recent = due <= 22
+    const status: SaleInstallment['status'] = cancelled ? 'cancelled'
+      : bounced ? 'bounced'
+        : settled
+          // A transfer lands or it doesn't; only checks sit in between.
+          ? (!isCheck ? 'cleared'
+            : roll < 0.08 ? 'collected'
+              : recent && roll < 0.45 ? 'deposited' : 'cleared')
+          // Not yet due - but a post-dated check is often already in hand.
+          : (isCheck && rand() < 0.25 ? 'collected' : 'pending')
+
+    const inHand = status === 'collected' || status === 'deposited' || status === 'cleared'
+    /**
+     * When the collector actually got hold of it.
+     *
+     * Two different stories, and using one formula for both put collection
+     * dates in the future. A payment that was already due is collected a few
+     * days AFTER its due date - chased, and a little late. A post-dated check
+     * is the opposite: handed over early, weeks BEFORE the date written on it,
+     * which is the whole reason it then sits in a drawer. `daysAgo` counts
+     * backwards, so the two cases move the number in opposite directions, and
+     * either way it is clamped to at least yesterday - nobody collects money
+     * in the future.
+     */
+    const collectedDay = due > 10
+      ? due - pick([0, 1, 2, 4])
+      : Math.max(due + pick([3, 5, 8, 14]), 1)
+    // The date on the face of the check: its due date. Collected early, it is
+    // still unbankable until then - which is the whole point of the field.
+    const checkDay = due
+    const depositedDay = Math.min(collectedDay, checkDay) - pick([0, 1])
+    const clearedDay = depositedDay - pick([1, 2, 3])
+
+    const iso = (d: number) => daysAgo(Math.max(d, -21))
     return {
-      id: nanoid(8), amount, principal: amount, interestPct: 0, dueDate: daysAgo(Math.max(due, -21)), status,
-      collectedAt: status === 'collected' ? daysAgo(Math.max(due - pick([0, 1, 2, 4]), -21)) : undefined,
+      id: nanoid(8), amount, principal: amount, interestPct: 0, dueDate: iso(due), status,
+      checkDate: isCheck ? iso(checkDay) : undefined,
+      collectedAt: inHand || bounced ? iso(collectedDay) : undefined,
+      depositedAt: status === 'deposited' || status === 'cleared' ? iso(depositedDay) : undefined,
+      clearedAt: status === 'cleared' ? iso(clearedDay) : undefined,
+      referenceNo: isCheck ? `${pick(['BPI', 'BDO', 'MBTC', 'SEC'])}-${100000 + Math.floor(rand() * 899999)}` : undefined,
+      depositSlipNo: status === 'deposited' || status === 'cleared' ? `DS-${200000 + Math.floor(rand() * 799999)}` : undefined,
+      // Which of our accounts it went into - blank until it is actually banked.
+      bankAccountId: status === 'deposited' || status === 'cleared' ? pick(bankAccounts).id : undefined,
+      notes: bounced ? pick(BOUNCE_REASONS) : undefined,
       // Later installments of a split plan occasionally have their own person in charge.
       collectorId: k > 0 && rand() < 0.3 ? pick(collectors).id : undefined,
     }
   })
 }
+
+const BOUNCE_REASONS = [
+  'Insufficient funds - client re-issuing',
+  'Account closed',
+  'Drawn against uncollected deposits',
+  'Signature differs from specimen',
+  'Stop payment order from the drawer',
+]
+
+/**
+ * The demo accounts that write checks which don't clear.
+ *
+ * Without any, the bounced path is invisible in the demo: the board's Bounced
+ * column is empty, an account's credit history is blank, and the B.P. 22 and
+ * R.A. 10951 notes never appear, so none of it can be looked at without hand-
+ * editing a record. Real books don't scatter bounces evenly either - most
+ * accounts never write a bad check and one or two write several - and the
+ * escalating estafa brackets only say anything on an account that has more
+ * than one. Named rather than sampled, so the same accounts are the shaky
+ * ones every time and the figures on them are stable enough to talk about.
+ */
+const SHAKY_PAYERS = ['Bahia Resort Group', 'Tridente Marine Services']
+const shakyPayer = (company: string) => SHAKY_PAYERS.includes(company)
 
 /** Same idea, mirrored for money owed to a supplier. */
 function makePurchaseInstallments(day: number, total: number, paymentMode: Purchase['paymentMode'], supplier: Supplier, date: string): PurchaseInstallment[] {
@@ -229,7 +326,13 @@ function makePurchaseInstallments(day: number, total: number, paymentMode: Purch
     const due = day - (supplier.paymentTermDays + k * 15)
     const cancelled = rand() < 0.05
     const status: PurchaseInstallment['status'] = cancelled ? 'cancelled' : due > 10 ? 'paid' : 'pending'
-    return { id: nanoid(8), amount, principal: amount, interestPct: 0, dueDate: daysAgo(Math.max(due, -21)), status }
+    return {
+      id: nanoid(8), amount, principal: amount, interestPct: 0, dueDate: daysAgo(Math.max(due, -21)), status,
+      // Money out has the same custody question as money in, so Treasury's
+      // payables list needs to know when each one actually left and on what.
+      paidAt: status === 'paid' ? daysAgo(Math.max(due - pick([0, 1, 2]), -21)) : undefined,
+      referenceNo: status === 'paid' ? `${pick(['BPI', 'BDO', 'MBTC'])}-${100000 + Math.floor(rand() * 899999)}` : undefined,
+    }
   })
 }
 
@@ -390,7 +493,7 @@ export function makeDemoData(): DemoData {
         // Most sales have a default person in charge of collection; a few are left
         // unassigned so the module's "Unassigned" group has something to show.
         collectorId: rand() < 0.85 ? pick(collectors).id : undefined,
-        installments: makeSaleInstallments(day, volumeLiters * pricePerLiter, paymentMode, customer, collectors),
+        installments: makeSaleInstallments(day, volumeLiters * pricePerLiter, paymentMode, customer, collectors, bankAccounts),
         // Work in progress does not stop at yesterday. Everything older than a
         // day used to be 'fulfilled', so the current month read as a finished
         // month with two live days stuck on the end - no order confirmed on

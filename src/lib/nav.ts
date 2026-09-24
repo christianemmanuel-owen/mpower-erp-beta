@@ -1,4 +1,4 @@
-import { Boxes, ClipboardCheck, HandCoins, IdCard, LayoutDashboard, Receipt, Settings as SettingsIcon, Truck, Users } from 'lucide-react'
+import { Boxes, ClipboardCheck, HandCoins, IdCard, Landmark, LayoutDashboard, Receipt, Settings as SettingsIcon, Truck, Users } from 'lucide-react'
 import type { ModuleKey } from '../data/types'
 
 /**
@@ -43,7 +43,12 @@ export interface NavItem {
  * rendered by the module but named in no nav entry, so nothing in the app could
  * open either of them. */
 export const nav: NavItem[] = [
-  { to: '/', label: 'Home', icon: 'home', module: 'dashboard' },
+  {
+    to: '/', label: 'Home', icon: 'home', module: 'dashboard',
+    // The full calendar is Home's one subpage: the card on Home is the
+    // month; this is the week view and the layer switches.
+    children: [{ to: '/', label: 'Overview' }, { to: '/calendar', label: 'Calendar' }],
+  },
   {
     to: '/inventory', label: 'Stock', icon: 'stock', module: 'inventory', group: 'Operations',
     children: [
@@ -58,7 +63,7 @@ export const nav: NavItem[] = [
     children: [
       { to: '/logistics', label: 'Board' },
       { to: '/logistics/maintenance', label: 'Maintenance' },
-      { to: '/logistics/bans', label: 'Truck bans' },
+      { to: '/logistics/bans', label: 'Coding & truck ban' },
     ],
   },
   { to: '/sales', label: 'Sales', icon: 'sales', module: 'sales', group: 'Revenue' },
@@ -69,6 +74,17 @@ export const nav: NavItem[] = [
       { to: '/collection/calendar', label: 'Calendar' },
       { to: '/collection/balances', label: 'Balances' },
       { to: '/collection/collectors', label: 'Collectors' },
+    ],
+  },
+  {
+    // Beside Collect rather than under it: whoever banks the money has to be
+    // able to be someone other than whoever received it, and a child of
+    // Collect would have shared Collect's permission.
+    to: '/treasury', label: 'Treasury', icon: 'cash', module: 'treasury', group: 'Revenue',
+    children: [
+      { to: '/treasury', label: 'Deposits' },
+      { to: '/treasury/clearing', label: 'Clearing' },
+      { to: '/treasury/payables', label: 'Payables' },
     ],
   },
   {
@@ -99,6 +115,7 @@ export const navIcons: Record<string, typeof LayoutDashboard> = {
   stock: Boxes,
   sales: Receipt,
   collect: HandCoins,
+  cash: Landmark,
   accounts: Users,
   trips: Truck,
   hr: IdCard,
@@ -126,5 +143,10 @@ export function moduleForPath(path: string): { icon: typeof LayoutDashboard; lab
     }
   }
   if (!best) return { icon: navIcons.home, label: 'Home' }
-  return { icon: navIcons[best.icon] ?? navIcons.home, label: best.label }
+  // A link into a module's subpage is named after the subpage: "Open
+  // Purchases", not "Open Stock" for an arrow that lands on the purchases
+  // list. The module's own root keeps the module's name.
+  const bare = path.split('?')[0]
+  const child = best.children?.find((c) => c.to === bare && c.to !== best!.to)
+  return { icon: navIcons[best.icon] ?? navIcons.home, label: child?.label ?? best.label }
 }

@@ -12,9 +12,11 @@ const at = (to: string, action?: string) =>
 
 describe('moduleForPath', () => {
   it('resolves a subpage through its parent module, not the root', () => {
-    // '/' is a nav entry, so a naive prefix match would claim every path.
-    expect(moduleForPath('/inventory/warnings').label).toBe('Stock')
-    expect(moduleForPath('/hr/drug-tests').label).toBe('HR')
+    // '/' is a nav entry, so a naive prefix match would claim every path. A
+    // listed subpage is named as itself; its icon is still the module's.
+    expect(moduleForPath('/inventory/warnings').label).toBe('Warnings')
+    expect(moduleForPath('/inventory/warnings').icon).toBe(moduleForPath('/inventory').icon)
+    expect(moduleForPath('/hr/drug-tests').label).toBe('Drug tests')
     expect(moduleForPath('/collection').label).toBe('Collect')
   })
 
@@ -42,7 +44,7 @@ describe('ModuleLink', () => {
   it('keeps the destination in the accessible name once the words are gone', () => {
     const { getByRole } = at('/collection')
     expect(getByRole('link').getAttribute('aria-label')).toBe('Open Collect')
-    expect(getByRole('link').getAttribute('title')).toBe('Open Collect')
+    expect(getByRole('link').getAttribute('data-tip')).toBe('Open Collect')
   })
 
   it('takes a verb for rows that do something other than open', () => {
@@ -58,18 +60,27 @@ describe('ModuleLink', () => {
       <MemoryRouter><ModuleLink to="/settings/history" destination="Input history" /></MemoryRouter>,
     )
     expect(getByRole('link').getAttribute('aria-label')).toBe('Open Input history')
-    expect(getByRole('link').getAttribute('title')).toBe('Open Input history')
+    expect(getByRole('link').getAttribute('data-tip')).toBe('Open Input history')
   })
 
-  it('is drawn as a bordered control, which is what reads as clickable', () => {
-    // A bare glyph does not announce itself as a button - none of the products
-    // surveyed ship one for navigation.
+  it('is the same borderless square as the row actions, carrying the arrow', () => {
     const { container } = at('/sales')
-    expect(container.innerHTML).toContain('border-inputline')
+    expect(container.innerHTML).not.toContain('border-inputline')
+    expect(container.querySelector('svg.go-arrow')).toBeTruthy()
   })
 
   it('points somewhere real', () => {
     const { getByRole } = at('/inventory/purchases')
     expect(getByRole('link').getAttribute('href')).toBe('/inventory/purchases')
+  })
+
+  /** The home page's Incoming card said "Open Stock" and landed on the
+   *  purchases list; a subpage link is named after the subpage. */
+  it('names a subpage link after the subpage', () => {
+    const { getByRole } = render(<MemoryRouter><ModuleLink to="/inventory/purchases" /></MemoryRouter>)
+    expect(getByRole('link').getAttribute('data-tip')).toBe('Open Purchases')
+    cleanup()
+    const root = render(<MemoryRouter><ModuleLink to="/inventory" /></MemoryRouter>)
+    expect(root.getByRole('link').getAttribute('data-tip')).toBe('Open Stock')
   })
 })

@@ -22,6 +22,11 @@ export default function NotificationBell() {
   const { data } = useNotifications()
   const markRead = useMarkRead()
   const [open, setOpen] = useState(false)
+  // Rings once when the unread count rises - not on first paint, not on a
+  // poll that changed nothing. Keyed on the count so the class re-applies
+  // for the next rise after the animation has finished.
+  const [rang, setRang] = useState(false)
+  const lastUnread = useRef<number | null>(null)
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -34,6 +39,14 @@ export default function NotificationBell() {
   }, [open])
 
   const unread = data?.unread ?? 0
+  useEffect(() => {
+    const rose = lastUnread.current !== null && unread > lastUnread.current
+    lastUnread.current = unread
+    if (!rose) return
+    setRang(true)
+    const t = setTimeout(() => setRang(false), 700)
+    return () => clearTimeout(t)
+  }, [unread])
   const rows = data?.rows ?? []
 
   function openItem(n: AppNotification) {
@@ -48,9 +61,9 @@ export default function NotificationBell() {
         type="button"
         onClick={() => setOpen((v) => !v)}
         title="Notifications"
-        className="relative flex h-8 w-8 cursor-pointer items-center justify-center rounded-[9px] hover:bg-fill2"
+        className="relative flex h-8 w-8 cursor-pointer items-center justify-center rounded-[9px] transition-[background-color,transform] duration-150 hover:bg-fill2 active:scale-[.92] motion-reduce:transition-none"
       >
-        <Bell size={17} strokeWidth={2} color="#55637a" />
+        <Bell size={17} strokeWidth={2} color="#55637a" className={rang ? 'bell-ring' : undefined} />
         {unread > 0 && (
           <span className="absolute -right-0.5 -top-0.5 flex h-[15px] min-w-[15px] items-center justify-center rounded-full bg-redf px-[3px] text-[9px] font-semibold text-white">
             {unread > 99 ? '99+' : unread}
@@ -59,7 +72,7 @@ export default function NotificationBell() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-10 z-50 w-[340px] overflow-hidden rounded-[12px] border border-inputline bg-white shadow-lg">
+        <div className="drop-in absolute right-0 top-10 z-50 w-[340px] overflow-hidden rounded-[12px] border border-inputline bg-white shadow-lg">
           <div className="flex items-center justify-between border-b border-fill2 px-3 py-2">
             <span className="text-[13px] font-semibold text-lab">Notifications</span>
             {unread > 0 && (

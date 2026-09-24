@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
 import { Check } from 'lucide-react'
-import { Avatar, Dialog, Field, GhostButton, Input, PrimaryButton, Select, type DialogStep } from '../../components/ui'
+import { Avatar, Dialog, Field, FormSection, GhostButton, Input, PrimaryButton, Select, WIDE_DIALOG } from '../../components/ui'
+import { FormNav, useSectionNav, type FormNavSection } from '../../components/FormNav'
+import { RailAside, RailRow, RailSection } from '../../components/SummaryRail'
 import { useToast } from '../../components/Toast'
 import { useTables, type TableName } from '../../lib/data'
 import { fmtDate } from '../../lib/format'
@@ -26,8 +28,12 @@ import {
  *
  * Rendering all fifteen at once turned out to be its own problem: a wall of
  * inputs with Approve sitting under it, which invites deciding before reading.
- * The fields are grouped into steps instead, and the decision waits on a Review
- * page that shows the whole submission and what - if anything - was changed.
+ * So the fields are grouped into sections with a nav down the left, the same
+ * frame as the seat, customer and employee editors, and the right-hand rail
+ * keeps the whole submission in view: who sent it, the figures, and what - if
+ * anything - the approver has changed, with the old value beside the new.
+ * A stepped wizard was tried first; it hid the rest of the submission behind
+ * Next, and the review at the end was a second reading of pages just read.
  */
 
 /**
@@ -38,6 +44,9 @@ const INSTALLMENT_STATUSES: Record<string, { value: string; label: string }[]> =
   sales: [
     { value: 'pending', label: 'Pending' },
     { value: 'collected', label: 'Collected' },
+    { value: 'deposited', label: 'In clearing' },
+    { value: 'cleared', label: 'Cleared' },
+    { value: 'bounced', label: 'Bounced' },
     { value: 'cancelled', label: 'Cancelled' },
   ],
   purchases: [
@@ -50,7 +59,7 @@ const INSTALLMENT_STATUSES: Record<string, { value: string; label: string }[]> =
 /** The reference tables the drawer resolves ids against. Fetched as a set
  * because a payload can point at several at once and useTables wants one call. */
 const LOOKUPS = [
-  'warehouses', 'suppliers', 'customers', 'personnel', 'trucks', 'products', 'bankAccounts',
+  'warehouses', 'suppliers', 'customers', 'personnel', 'agents', 'trucks', 'products', 'bankAccounts',
 ] as const satisfies readonly TableName[]
 
 export default function ApprovalDrawer({ row, onClose, canDecide }: {
@@ -108,7 +117,7 @@ export default function ApprovalDrawer({ row, onClose, canDecide }: {
       setEdits({})
       return true
     } catch (e) {
-      toast(e instanceof Error ? e.message : 'Couldn’t save those changes.')
+      toast(e instanceof Error ? e.message : 'Unable to save these changes.')
       return false
     }
   }
@@ -118,7 +127,7 @@ export default function ApprovalDrawer({ row, onClose, canDecide }: {
     // they see rather than what was parked. Two clicks would be a trap.
     if (dirty && decision === 'approve' && !(await save())) return
     await decide.mutateAsync({ id: row.id, decision, note, tbl: row.tbl })
-    toast(decision === 'approve' ? 'Approved. It has posted to the System.' : 'Rejected.')
+    toast(decision === 'approve' ? 'Approved and posted.' : 'Rejected.')
     onClose()
   }
 
@@ -200,59 +209,22 @@ export default function ApprovalDrawer({ row, onClose, canDecide }: {
   }
 
   const keys = fieldsOf(row.payload)
-  const steps: DialogStep[] = GROUP_ORDER
-    .map((group) => ({ group, fields: keys.filter((k) => groupFor(k) === group) }))
+  const groups = GROUP_ORDER
+    .map((group) => ({ group, id: `ap-${group.toLowerCase()}`, fields: keys.filter((k) => groupFor(k) === group) }))
     .filter((g) => g.fields.length > 0)
-    .map(({ group, fields }) => ({
-      title: group,
-      content: <div className="grid grid-cols-2 gap-[14px]">{fields.map(control)}</div>,
-    }))
+  const sectionIds = [...groups.map((g) => g.id), ...(canDecide ? ['ap-decision'] : [])]
+  const { active, jump } = useSectionNav(sectionIds)
 
-  steps.push({
-    title: 'Review',
-    content: (
-      <div className="flex flex-col gap-[14px]">
-        {dirty ? (
-          <p className="m-0 rounded-[6px] border border-line bg-paper px-3 py-2 font-meta text-[12px] text-lab">
-            Modifying {changed.map(labelFor).join(', ')}. {row.requestedByName} is notified of these changes when it posts.
-          </p>
-        ) : (
-          <p className="m-0 font-meta text-[12px] text-mut">Unchanged from the original submission.</p>
-        )}
+  // A tick marks a section the approver has amended; a dot is as submitted.
+  const navSections: FormNavSection[] = [
+    ...groups.map((g) => ({
+      id: g.id, title: g.group,
+      state: g.fields.some((k) => changed.includes(k)) ? 'done' as const : 'todo' as const,
+    })),
+    ...(canDecide ? [{ id: 'ap-decision', title: 'Decision', state: note.trim() ? 'done' as const : 'todo' as const }] : []),
+  ]
 
-        <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-5 gap-y-[6px]">
-          {keys.filter((k) => kindFor(k, row.payload[k]) !== 'complex').map((k) => (
-            <div key={k} className="contents">
-              <dt className="whitespace-nowrap font-meta text-[12px] text-mut">{labelFor(k)}</dt>
-              <dd className={`m-0 text-[13px] ${changed.includes(k) ? 'font-semibold text-ink' : 'text-lab'}`}>
-                {display(k)}
-                {changed.includes(k) && (
-                  <span className="ml-2 font-meta text-[12px] font-normal text-mut">
-                    was {displayOf(k, row.payload[k])}
-                  </span>
-                )}
-              </dd>
-            </div>
-          ))}
-        </dl>
-
-        {keys.filter((k) => kindFor(k, row.payload[k]) === 'complex').map((k) => (
-          <div key={k}>
-            <p className="m-0 mb-[6px] font-meta text-[10px] font-semibold uppercase tracking-[.09em] text-faint">
-              {labelFor(k)}
-            </p>
-            <NestedValue value={merged[k]} />
-          </div>
-        ))}
-
-        {canDecide && (
-          <Field label="Note" hint="Optional. Sent to the submitter with the decision.">
-            <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Reason, or what you changed and why" />
-          </Field>
-        )}
-      </div>
-    ),
-  })
+  const simpleKeys = keys.filter((k) => kindFor(k, row.payload[k]) !== 'complex')
 
   // The figures the server put in the summary, without the "New sale -" it
   // prefixes them with; the heading says that part now.
@@ -263,21 +235,49 @@ export default function ApprovalDrawer({ row, onClose, canDecide }: {
       open
       title={submissionTitle(row.action, row.tbl)}
       subtitle={figures}
-      aside={
-        // Who sent it, and when. Sits in the header rather than the body
-        // because it is true of every step, and because an approver deciding on
-        // page five should not have to remember whose work it is.
-        <span className="flex items-center gap-[7px]">
-          <Avatar name={row.requestedByName} size={24} />
-          <span className="text-left">
-            <span className="block truncate text-[13px] font-semibold leading-[1.2]">{row.requestedByName}</span>
-            <span className="block font-meta text-[12px] leading-[1.3] text-mut">{fmtDate(row.requestedAt)}</span>
-          </span>
-        </span>
-      }
       onClose={onClose}
-      width={720}
-      steps={steps}
+      width={WIDE_DIALOG}
+      nav={<FormNav sections={navSections} active={active} onJump={jump} />}
+      rail={
+        <>
+          {/* Who sent it, and when - true of every section, so it lives beside
+              them rather than on one of them. */}
+          <RailSection title="Submitted by">
+            <span className="flex items-center gap-[8px]">
+              <Avatar name={row.requestedByName} size={24} />
+              <span className="min-w-0">
+                <span className="block truncate text-[13px] font-semibold leading-[1.2]">{row.requestedByName}</span>
+                <span className="block font-meta text-[12px] leading-[1.3] text-mut">{fmtDate(row.requestedAt)}</span>
+              </span>
+            </span>
+          </RailSection>
+
+          {/* The submission as one column of facts, so the approver reads the
+              whole of it without scrolling the form - and a changed field shows
+              the old value beside the new. */}
+          <RailSection title="Submission">
+            {simpleKeys.map((k) => (
+              <RailRow
+                key={k}
+                label={labelFor(k)}
+                value={
+                  <span className={changed.includes(k) ? 'font-semibold text-ink' : undefined}>
+                    {display(k)}
+                    {changed.includes(k) && (
+                      <span className="ml-[6px] font-meta text-[11px] font-normal text-mut line-through">
+                        {displayOf(k, row.payload[k])}
+                      </span>
+                    )}
+                  </span>
+                }
+              />
+            ))}
+            {dirty
+              ? <RailAside>Modifying {changed.map(labelFor).join(', ')}. {row.requestedByName} is notified when it posts.</RailAside>
+              : <RailAside>Unchanged from the original submission.</RailAside>}
+          </RailSection>
+        </>
+      }
       footer={
         canDecide ? (
           // Least to most committing, left to right - the primary sits at the
@@ -293,6 +293,22 @@ export default function ApprovalDrawer({ row, onClose, canDecide }: {
           <GhostButton onClick={onClose}>Close</GhostButton>
         )
       }
-    />
+    >
+      {groups.map((g, i) => (
+        <div key={g.id}>
+          <FormSection id={g.id} first={i === 0}>{g.group}</FormSection>
+          <div className="grid grid-cols-2 gap-[14px]">{g.fields.map(control)}</div>
+        </div>
+      ))}
+
+      {canDecide && (
+        <div>
+          <FormSection id="ap-decision">Decision</FormSection>
+          <Field label="Note" hint="Optional. Sent to the submitter with the decision.">
+            <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Reason, or what was changed and why" />
+          </Field>
+        </div>
+      )}
+    </Dialog>
   )
 }

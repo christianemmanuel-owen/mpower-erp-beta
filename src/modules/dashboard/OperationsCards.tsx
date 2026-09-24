@@ -1,4 +1,5 @@
 import { ModuleLink } from '../../components/ModuleLink'
+import { RecordLink } from '../../lib/peek'
 import { Link } from 'react-router-dom'
 import { Card, MiniDark } from '../../components/ui'
 import { fmtCurrency, fmtDate, fmtLiters, fmtTime } from '../../lib/format'
@@ -136,7 +137,7 @@ export function MovementsCard({
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13px] font-semibold">
                       {href
-                        ? <Link to={href} className="text-ink hover:underline">{customer?.company ?? d.deliveryAddress ?? 'Movement'}</Link>
+                        ? <RecordLink to={href} className="text-ink hover:underline">{customer?.company ?? d.deliveryAddress ?? 'Movement'}</RecordLink>
                         : (customer?.company ?? d.deliveryAddress ?? 'Movement')}
                       {sale && <span className="font-normal text-mut"> · {fmtLiters(sale.volumeLiters)}</span>}
                     </span>
@@ -223,7 +224,7 @@ export function IncomingCard({ purchases, suppliers, warehouses, today }: {
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13px] font-semibold">
             {href
-              ? <Link to={href} className="text-ink hover:underline">{supplier?.name ?? 'Unknown supplier'}</Link>
+              ? <RecordLink to={href} className="text-ink hover:underline">{supplier?.name ?? 'Unknown supplier'}</RecordLink>
               : (supplier?.name ?? 'Unknown supplier')}
             <span className="font-normal text-mut"> · {fmtLiters(p.volumeLiters)}</span>
           </span>

@@ -18,6 +18,7 @@
 //   /api/approvals/*               approval-based inputs            (2.1)
 //   /api/notifications/*           notification inbox + push        (2.11)
 //   /api/refs/*                    document reference numbering     (1.2, 1.3, 1.5, 1.6)
+//   /api/route-estimate            drive time depot → address       (trip scheduling)
 //
 // Low supply warnings (2.3) have no endpoint of their own: they are evaluated on
 // the writes that move stock, at the bottom of the POST/PUT/DELETE branches.
@@ -34,13 +35,19 @@ import * as approvals from '../../server/approvals'
 import * as audit from '../../server/audit'
 import * as notifications from '../../server/notifications'
 import { handleRefs } from '../../server/refs'
+import { handleGeocode, handleReverseGeocode, handleRouteEstimate } from '../../server/routing'
 import * as stock from '../../server/stock'
-import { canWriteRecord } from '../../server/access'
+import { TABLE_WRITE_MODULES, canWriteRecord, foreignFieldProblem, installmentWriteProblem } from '../../server/access'
+import { fulfilOnDelivery } from '../../server/fulfilment'
+import {
+  SCOPED_TABLES, crewFieldViolations, isScoped, mayWriteRecord, ownsRecord, visibleRows,
+  type ScopeSeat,
+} from '../../server/scope'
 import { validateRecord } from '../../server/validate'
 
 const TABLES = new Set([
   'suppliers', 'warehouses', 'agents', 'customers', 'bankAccounts', 'personnel',
-  'trucks', 'purchases', 'sales', 'deliveries', 'supplierQuotes', 'seats',
+  'haulers', 'trucks', 'purchases', 'sales', 'deliveries', 'supplierQuotes', 'seats',
   'shifts', 'attendance', 'leaves', 'holidays', 'payrollRuns', 'hrSettings',
   // Added 2026-08-20 alongside the infrastructure layers, so the module work in
   // later waves has somewhere to write. Each is a plain JSON-document table like
@@ -72,17 +79,36 @@ const ADMIN_WRITE_TABLES = new Set(['appSettings'])
  */
 const OWN_SEAT_TABLES = new Set(['todos', 'dashboardLayouts'])
 
+/**
+ * Who may put a to-do on somebody else's list: administrators and approvers.
+ * The rest of the app already treats those two flags as "this seat manages
+ * other people's work", so reusing them means no new permission to explain.
+ */
+const mayAssign = (seat: Seat) => Boolean(seat.isAdmin || seat.canApprove)
+
+/**
+ * Whether a seat may see and change a to-do. The owner (whose list it is on)
+ * always may; the seat that assigned it may too, so a manager can see whether
+ * it was done and take it back. Nobody else - an assigned task is still
+ * private between the two of them.
+ */
+const touchesTodo = (seat: Seat, row: Rec) => row.seatId === seat.id || row.assignedById === seat.id
+
 // ---- HR access rules --------------------------------------------------------
 // Payroll data is sensitive: the nav-rail guard on the client is cosmetic, these
 // are the checks that matter.
 //   - HR tables need the 'hr' module (or admin) even to read.
-//   - Setup tables (shifts, holidays, hrSettings) are readable by HR seats but
-//     writable only by admins.
+//   - Setup tables (shifts, hrSettings) are readable by HR seats but writable
+//     only by admins. `holidays` is the exception: it is a public calendar, and
+//     Trips reads it to know which days number coding is lifted - so a
+//     dispatcher without HR could not open the Trips page at all while it sat
+//     behind the HR gate (useTables never resolved on the 403). Anyone signed
+//     in may read it; writing it is still admin-only.
 //   - `personnel` is shared with Trips, so everyone can read it - but pay-related
 //     fields are stripped unless the seat has HR access, and writes need HR access.
 //   - Finalized payroll runs are immutable except for admins (un-finalize/fix).
 
-const HR_TABLES = new Set(['attendance', 'leaves', 'shifts', 'holidays', 'payrollRuns', 'hrSettings', 'drugTests'])
+const HR_TABLES = new Set(['attendance', 'leaves', 'shifts', 'payrollRuns', 'hrSettings', 'drugTests'])
 const HR_ADMIN_WRITE = new Set(['shifts', 'holidays', 'hrSettings'])
 const PERSONNEL_HR_FIELDS = [
   'rateType', 'baseRate', 'allowancePerDay', 'paySchedule', 'hireDate',
@@ -94,6 +120,7 @@ const PERSONNEL_HR_FIELDS = [
  * document is exactly as guarded as the record it hangs off. */
 const TABLE_MODULE: Record<string, string> = {
   purchases: 'inventory',
+  haulers: 'inventory',
   supplierQuotes: 'inventory',
   stockThresholds: 'inventory',
   vehicleMaintenance: 'logistics',
@@ -135,7 +162,27 @@ async function authSeat(request: Request, db: D1Database): Promise<Seat | null> 
     await db.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run()
     return null
   }
-  return (await getRow(db, 'seats', session.seat_id)) as Seat | null
+  const seat = (await getRow(db, 'seats', session.seat_id)) as Seat | null
+  return withAgent(db, seat)
+}
+
+/**
+ * A field seat's Agent id, resolved here rather than at every call site.
+ *
+ * Sales carry `agentId` (the Agent record with the quota), while a login is
+ * tied to a Personnel record; `Personnel.agentId` is the bridge between them.
+ * Without this an agent's own sales would not match their own seat.
+ *
+ * It is also the only way the phone can learn it: `Personnel.agentId` is an HR
+ * field, stripped from the employee row for any seat without HR access - which
+ * every field seat is. So the client reads it off the session, and it has to
+ * be on the login response as well as on /me, or the first thirty seconds
+ * after signing in look like an unlinked seat.
+ */
+async function withAgent(db: D1Database, seat: Seat | null): Promise<Seat | null> {
+  if (!seat?.personnelId) return seat
+  const person = (await getRow(db, 'personnel', seat.personnelId)) as { agentId?: string } | null
+  return person?.agentId ? ({ ...seat, agentId: person.agentId } as Seat & ScopeSeat) : seat
 }
 
 /** Applies a seat write coming from the client: hashes a new password if given,
@@ -172,7 +219,7 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
       const token = randomHex(32)
       await db.prepare('INSERT INTO sessions (token, seat_id, created_at) VALUES (?, ?, ?)').bind(token, seat.id, now()).run()
       await audit.record(db, { seat, action: 'login', tbl: 'seats', recordId: seat.id })
-      return json({ token, seat: stripSeat(seat) })
+      return json({ token, seat: stripSeat((await withAgent(db, seat)) ?? seat) })
     }
 
     if (parts[0] === 'logout' && method === 'POST') {
@@ -197,19 +244,25 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
     // ---- infrastructure endpoints ------------------------------------------
     // Read/write predicates shared with the attachment layer, so a document
     // inherits exactly the guard of the record it belongs to.
+    // A table's documents belong to every desk that writes the table, not
+    // only the one that "owns" it. The check photo on a sale is taken by the
+    // collector and the deposit slip by the treasurer; neither holds the
+    // sales module, and with the single-module map here both were told they
+    // had no access to the record's documents from inside their own screens.
+    const tableModules = (tbl: string): string[] | undefined =>
+      TABLE_WRITE_MODULES[tbl] ?? (TABLE_MODULE[tbl] ? [TABLE_MODULE[tbl]] : undefined)
+    const inModules = (mods: string[] | undefined) => !mods || mods.some((m) => (me.modules ?? []).includes(m))
     const canReadTable = (tbl: string) => {
       if (me.isAdmin) return true
       if (HR_TABLES.has(tbl) || tbl === 'personnel') return canHr(me)
-      const mod = TABLE_MODULE[tbl]
-      return !mod || (me.modules ?? []).includes(mod)
+      return inModules(tableModules(tbl))
     }
     const canWriteTable = (tbl: string) => {
       if (me.isAdmin) return true
       if (tbl === 'seats') return false
       if (HR_ADMIN_WRITE.has(tbl)) return false
       if (HR_TABLES.has(tbl) || tbl === 'personnel') return canHr(me)
-      const mod = TABLE_MODULE[tbl]
-      return !mod || (me.modules ?? []).includes(mod)
+      return inModules(tableModules(tbl))
     }
 
     if (parts[0] === 'attachments') {
@@ -240,6 +293,12 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
       if (res) return res
       return err(405, 'Method not allowed.')
     }
+
+    // Drive time for a delivery - see server/routing.ts. Anyone signed in may
+    // ask; it reads nothing from the database.
+    if (parts[0] === 'route-estimate' && method === 'GET') return handleRouteEstimate(url, env)
+    if (parts[0] === 'geocode' && parts[1] === 'reverse' && method === 'GET') return handleReverseGeocode(url, env)
+    if (parts[0] === 'geocode' && method === 'GET') return handleGeocode(url, env)
 
     if (parts[0] === 'import' && method === 'POST') {
       if (!me.isAdmin) return err(403, 'Admin only.')
@@ -292,12 +351,19 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
         const row = await getRow(db, tbl, id)
         if (!row) return err(404, 'Not found.')
         // 404 rather than 403: a private note's existence is itself private.
-        if (OWN_SEAT_TABLES.has(tbl) && row.seatId !== me.id) return err(404, 'Not found.')
+        if (tbl === 'todos' ? !touchesTodo(me, row) : OWN_SEAT_TABLES.has(tbl) && row.seatId !== me.id) return err(404, 'Not found.')
+        // Same reasoning for a field seat: somebody else's sale is not theirs
+        // to know about, so it is missing rather than forbidden.
+        if (isScoped(me) && SCOPED_TABLES.has(tbl) && !ownsRecord(me, tbl, row)) return err(404, 'Not found.')
         return json(isSeats ? stripSeat(row) : hidePay ? stripPersonnel(row) : row)
       }
       const rows = await tableRows(db, tbl)
+      if (tbl === 'todos') return json(rows.filter((r) => touchesTodo(me, r)))
       if (OWN_SEAT_TABLES.has(tbl)) return json(rows.filter((r) => r.seatId === me.id))
-      return json(isSeats ? rows.map(stripSeat) : hidePay ? rows.map(stripPersonnel) : rows)
+      // A scoped seat's list is filtered here, not in the client - see
+      // server/scope.ts for why that distinction is the whole point.
+      const mine = visibleRows(me, tbl, rows)
+      return json(isSeats ? mine.map(stripSeat) : hidePay ? mine.map(stripPersonnel) : mine)
     }
 
     // Module access, finally enforced on the record and not just on its
@@ -329,8 +395,16 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
       if (problems.length) return err(400, problems[0].message)
       const t = now()
       let data: Rec = { ...body, id: newId(), createdAt: t, updatedAt: t }
-      // Ignore any seatId the client sent - you can only create your own.
-      if (OWN_SEAT_TABLES.has(tbl)) data = { ...data, seatId: me.id }
+      // Ignore any seatId the client sent - you can only create your own -
+      // except a to-do from a seat that may assign, which goes on the list
+      // named and carries who put it there.
+      if (tbl === 'todos' && data.seatId && data.seatId !== me.id) {
+        if (!mayAssign(me)) return err(403, 'Only an administrator or approver can assign a to-do to someone else.')
+        if (!(await getRow(db, 'seats', String(data.seatId)))) return err(400, 'That seat does not exist.')
+        data = { ...data, assignedById: me.id, assignedByName: me.name }
+      } else if (OWN_SEAT_TABLES.has(tbl)) {
+        data = { ...data, seatId: me.id }
+      }
       if (isSeats) {
         data = await prepareSeatData(data)
         const seats = (await tableRows(db, 'seats')) as Seat[]
@@ -338,6 +412,11 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
           return err(409, 'That username is already taken.')
         }
         if (!data.passwordHash) return err(400, 'New seats need a password.')
+      }
+      // A field seat creates its own work and nobody else's: an agent's new sale
+      // carries their agent id, a crew seat cannot book a trip for another crew.
+      if (!mayWriteRecord(me, tbl, null, data)) {
+        return err(403, 'A field seat can only create records assigned to itself.')
       }
       // Secondary Feature 2.1 - park it instead of posting it.
       if (approvals.needsApproval(tbl, me, await approvals.loadRules(db), data)) {
@@ -357,11 +436,14 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
       const existing = await getRow(db, tbl, id)
       if (!existing) return err(404, 'Not found.')
       // You may only edit your own, and you may not hand it to someone else.
-      if (OWN_SEAT_TABLES.has(tbl) && existing.seatId !== me.id) return err(404, 'Not found.')
+      if (tbl === 'todos' ? !touchesTodo(me, existing) : OWN_SEAT_TABLES.has(tbl) && existing.seatId !== me.id) return err(404, 'Not found.')
       if (tbl === 'payrollRuns' && existing.status === 'finalized' && !me.isAdmin) {
         return err(409, 'This payroll run is finalized. Only an admin can reopen it.')
       }
       const body = (await request.json()) as Rec
+      // The list a to-do is on and who assigned it are set at creation and
+      // stay put: an update may tick it, date it or reword it, not move it.
+      if (tbl === 'todos') { delete body.seatId; delete body.assignedById; delete body.assignedByName }
       const problems = validateRecord(tbl, body, 'update')
       if (problems.length) return err(400, problems[0].message)
       delete body.id
@@ -379,11 +461,52 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
         }
       }
       if (OWN_SEAT_TABLES.has(tbl)) data = { ...data, seatId: existing.seatId }
+      // Checked against the stored row AND the result, so a scoped seat can
+      // neither edit someone else's record nor hand its own away - and cannot
+      // take over a trip by writing itself into the crew.
+      if (!mayWriteRecord(me, tbl, existing, data)) {
+        return err(404, 'Not found.')
+      }
+      /**
+       * Segregation of duties: whoever receives the money may not also be the
+       * one who records banking it.
+       *
+       * The module check above passes for a collections seat here, because a
+       * collection lives inside the sale and `sales` is a table Collections
+       * legitimately writes. Without this, a collector could mark their own
+       * collection deposited and cleared, and the separation the Cash desk
+       * exists to create would be a button we hid rather than a rule we kept.
+       */
+      if (tbl === 'sales') {
+        const problem = installmentWriteProblem(me, existing.installments, data.installments)
+        if (problem) return err(403, problem)
+      }
+      // The desk that owns the record edits it; every other desk with a way
+      // in (Collection, Treasury) edits its payments and nothing else.
+      {
+        const problem = foreignFieldProblem(me, tbl, existing, data)
+        if (problem) return err(403, problem)
+      }
+      /**
+       * Crew record what happened; they do not re-plan the trip.
+       *
+       * Without this a pahinante's phone could reschedule a delivery, swap the
+       * truck, or crew themselves off the job - all of which are dispatch's
+       * decisions. The checklist they signed, the stage reached, the receipt
+       * and the outcome are theirs.
+       */
+      if (isScoped(me) && tbl === 'deliveries') {
+        const beyond = crewFieldViolations(existing, data)
+        if (beyond.length > 0) {
+          return err(403, `A crew seat can record the trip, not change its plan (${beyond.join(', ')}).`)
+        }
+      }
       if (approvals.needsApproval(tbl, me, await approvals.loadRules(db), data)) {
         return approvals.submit(db, me, tbl, 'update', id, body)
       }
       await putStmt(db, tbl, data).run()
       await audit.record(db, { seat: me, action: 'update', tbl, recordId: id, before: existing, after: data })
+      if (tbl === 'deliveries') await fulfilOnDelivery(db, me, existing, data)
       if (stock.STOCK_TABLES.has(tbl)) {
         for (const w of await stock.affectedWarehouses(db, tbl, id, data)) await stock.checkThresholds(db, w)
       }
@@ -393,7 +516,7 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
     if (method === 'DELETE' && id) {
       if (OWN_SEAT_TABLES.has(tbl)) {
         const owned = await getRow(db, tbl, id)
-        if (!owned || owned.seatId !== me.id) return err(404, 'Not found.')
+        if (!owned || (tbl === 'todos' ? !touchesTodo(me, owned) : owned.seatId !== me.id)) return err(404, 'Not found.')
       }
       if (tbl === 'payrollRuns') {
         const existing = await getRow(db, tbl, id)
@@ -411,6 +534,12 @@ export const onRequest: PagesFunction<Env> = async (ctx) => {
         await db.prepare('DELETE FROM sessions WHERE seat_id = ?').bind(id).run()
       }
       const before = await getRow(db, tbl, id)
+      if (!mayWriteRecord(me, tbl, before, null)) return err(404, 'Not found.')
+      // Nothing a field seat does is a deletion: a trip that did not happen is
+      // failed, a sale that did not stick is cancelled. Both keep the record.
+      if (isScoped(me) && SCOPED_TABLES.has(tbl)) {
+        return err(403, 'A field seat cannot delete records. Mark it cancelled or failed instead.')
+      }
       if (approvals.needsApproval(tbl, me, await approvals.loadRules(db), before ?? {})) {
         return approvals.submit(db, me, tbl, 'delete', id, before ?? {})
       }

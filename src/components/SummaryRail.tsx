@@ -15,7 +15,7 @@ import type { ReactNode } from 'react'
  * like when it does not.
  */
 
-export function RailSection({ title, children }: { title: string; children: ReactNode }) {
+export function RailSection({ title, children }: { title: ReactNode; children: ReactNode }) {
   return (
     <section className="mb-[18px] last:mb-0">
       <p className="m-0 mb-[8px] font-meta text-[10px] font-semibold uppercase tracking-[.09em] text-mut">

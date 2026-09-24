@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { AlertTriangle, Plus, Trash2 } from 'lucide-react'
-import { Card, DataTable, Dialog, Field, GhostButton, Input, MiniDark, PrimaryButton, SectionLabel, Select, Switch, td } from '../../components/ui'
+import { AlertTriangle, Plus } from 'lucide-react'
+import { Card, DataTable, Dialog, Field, GhostButton, Input, MiniDark, PrimaryButton, RowAction, SectionLabel, Select, Switch, td } from '../../components/ui'
 import { fmtLiters } from '../../lib/format'
 import { stockFor } from '../../lib/metrics'
 import { hasCatalog, productName, productOptions, productKey } from '../../lib/products'
@@ -213,18 +213,14 @@ function Row({ threshold, warehouseName, productLabel, showProduct, level, onNot
               if (isPending(result)) onNotice(result.message)
             }}
           />
-          <button
-            type="button"
-            title="Remove this warning level"
-            aria-label={`Remove the warning level for ${warehouseName}`}
+          <RowAction
+            verb="delete"
+            label={`Remove the warning level for ${warehouseName}`}
             onClick={async () => {
               const result = await repos.stockThresholds.remove(threshold.id)
               if (isPending(result)) onNotice(result.message)
             }}
-            className="flex h-[26px] w-[26px] cursor-pointer items-center justify-center rounded-[6px] border-0 bg-transparent text-mut transition-colors hover:bg-fill2 hover:text-redtext"
-          >
-            <Trash2 size={14} strokeWidth={1.8} />
-          </button>
+          />
         </span>
       </td>
     </tr>

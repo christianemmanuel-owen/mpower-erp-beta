@@ -40,7 +40,7 @@ interface SaleRec extends Rec {
   warehouseId?: string
   productId?: string
   volumeLiters?: number
-  resolution?: { treatment?: string; volumeReturned?: number }
+  resolution?: { treatment?: string; volumeReturned?: number; backToStock?: boolean }
 }
 
 interface ThresholdRec extends Rec {
@@ -68,13 +68,19 @@ export function receivedVolume(p: PurchaseRec): number {
 
 /** DUPLICATED from restockedVolume() in src/lib/metrics.ts - see above. */
 export function restockedVolume(s: SaleRec): number {
-  if (s.status !== 'returned' || s.resolution?.treatment !== 'restocked') return 0
+  if (s.status !== 'returned') return 0
+  // New records say whether the fuel came back; older ones carried it as the
+  // treatment. Refunded / credited / replaced say nothing about the fuel.
+  const back = s.resolution?.backToStock ?? s.resolution?.treatment === 'restocked'
+  if (!back) return 0
   const total = s.volumeLiters ?? 0
-  return Math.min(s.resolution.volumeReturned ?? total, total)
+  return Math.min(s.resolution?.volumeReturned ?? total, total)
 }
 
-/** DUPLICATED from netSaleVolume() in src/lib/metrics.ts - see above. */
-export function netSaleVolume(s: SaleRec): number {
+/** DUPLICATED from stockSaleVolume() in src/lib/metrics.ts - see above. This
+ * is the STOCK basis (litres out of the tank), not net sales: a return whose
+ * fuel did not come back is off the sales figure but still gone from stock. */
+export function stockSaleVolume(s: SaleRec): number {
   const total = s.volumeLiters ?? 0
   if (s.status === 'returned') return Math.max(0, total - restockedVolume(s))
   return s.status === 'confirmed' || s.status === 'fulfilled' ? total : 0
@@ -94,7 +100,7 @@ export function stockFrom(
   }
   for (const s of sales) {
     if (s.warehouseId !== warehouseId || productKey(s.productId) !== productId) continue
-    stock -= netSaleVolume(s)
+    stock -= stockSaleVolume(s)
   }
   return stock
 }

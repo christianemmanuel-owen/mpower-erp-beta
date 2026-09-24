@@ -10,7 +10,7 @@ import { json, now, paging, type Rec, type Seat } from './core'
 
 export type AuditAction =
   | 'create' | 'update' | 'delete'
-  | 'submit' | 'approve' | 'reject' | 'amend'
+  | 'submit' | 'approve' | 'reject' | 'amend' | 'reverse'
   | 'upload' | 'remove_file'
   | 'login'
 
@@ -34,21 +34,28 @@ export function diff(before: Rec, after: Rec): Record<string, [unknown, unknown]
 
 /** One-line description an administrator can read without opening the record. */
 function describe(action: AuditAction, tbl: string, rec: Rec | null): string {
-  const label =
-    (rec?.company as string) ??
-    (rec?.name as string) ??
-    (rec?.plateNumber as string) ??
-    (rec?.referenceNo as string) ??
-    (rec?.id as string) ??
+  // Never the id: it names nothing to a person and was leaking into the
+  // history for every record without a name field. A sale, purchase or trip
+  // is described by its size and date instead.
+  const liters = typeof rec?.volumeLiters === 'number' ? `${rec.volumeLiters.toLocaleString()} L` : ''
+  const day = (d: unknown) => (typeof d === 'string' && d.length >= 10 ? `on ${d.slice(0, 10)}` : '')
+  let described =
+    (rec?.company as string | undefined) ??
+    (rec?.name as string | undefined) ??
+    (rec?.plateNumber as string | undefined) ??
+    (rec?.referenceNo as string | undefined) ??
     ''
+  if (!described && (tbl === 'sales' || tbl === 'purchases')) described = [liters, day(rec?.date)].filter(Boolean).join(' ')
+  if (!described && tbl === 'deliveries') described = day(rec?.scheduleDate)
   const verb: Record<AuditAction, string> = {
     create: 'created', update: 'edited', delete: 'deleted',
     submit: 'submitted for approval', approve: 'approved', reject: 'rejected',
-    amend: 'changed a pending', 
+    amend: 'changed a pending',
+    reverse: 'undid the decision on',
     upload: 'uploaded a document to', remove_file: 'removed a document from',
     login: 'signed in',
   }
-  return `${verb[action]} ${singular(tbl)}${label ? ` ${label}` : ''}`.trim()
+  return `${verb[action]} ${singular(tbl)}${described ? ` ${described}` : ''}`.trim()
 }
 
 function singular(tbl: string) {
@@ -70,10 +77,11 @@ export interface AuditInput {
 /** Writes one audit row. Never throws into the caller's path: an audit failure
  * must not turn a successful business write into a 500 the user sees. */
 export async function record(db: D1Database, input: AuditInput): Promise<void> {
-  const changes =
-    input.action === 'update' && input.before && input.after
-      ? JSON.stringify(diff(input.before, input.after))
-      : null
+  // Whenever both sides are known, the field-level diff is kept: an edit, an
+  // amendment in the queue, an approval that posted an edit, an undo. This
+  // used to be `update` only, which left "changed before approval" rows with
+  // nothing to open - and left amendedFields() with nothing to read.
+  const changes = input.before && input.after ? JSON.stringify(diff(input.before, input.after)) : null
   const summary = input.summary ?? describe(input.action, input.tbl, input.after ?? input.before ?? null)
   try {
     await db
@@ -136,6 +144,12 @@ export async function handleAudit(db: D1Database, url: URL, me: Seat): Promise<R
 
   const { limit, offset } = paging(url)
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  // The total under the same filter, so the page can say "of 1,240" and
+  // page through it rather than showing the first two hundred and stopping.
+  const count = await db
+    .prepare(`SELECT COUNT(*) AS n FROM audit_log ${clause}`)
+    .bind(...binds)
+    .first<{ n: number }>()
   const { results } = await db
     .prepare(`SELECT * FROM audit_log ${clause} ORDER BY at DESC, id DESC LIMIT ? OFFSET ?`)
     .bind(...binds, limit, offset)
@@ -155,5 +169,5 @@ export async function handleAudit(db: D1Database, url: URL, me: Seat): Promise<R
     summary: r.summary,
     changes: r.changes ? (JSON.parse(r.changes) as Record<string, [unknown, unknown]>) : null,
   }))
-  return json({ rows, limit, offset })
+  return json({ rows, limit, offset, total: count?.n ?? rows.length })
 }

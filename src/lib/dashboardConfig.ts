@@ -47,7 +47,6 @@ export const WIDGET_MODULE: Record<DashboardWidget, ModuleKey | null> = {
   todos: null,
   incoming: 'inventory',
   deliveryBoard: 'logistics',
-  cashFlow: 'collection',
   receivables: 'collection',
   announcements: null,
   approvals: null,
@@ -64,13 +63,67 @@ export const WIDGET_LABELS: Record<DashboardWidget, string> = {
   todos: 'To-do list',
   incoming: 'Incoming purchases',
   deliveryBoard: 'Movements',
-  cashFlow: 'Cash flow',
   receivables: 'Overdue receivables',
   announcements: 'Announcements',
   approvals: 'Awaiting approval',
 }
 
 export const ALL_WIDGETS = Object.keys(WIDGET_LABELS) as DashboardWidget[]
+
+/**
+ * Which tab each widget belongs to on the dashboard.
+ *
+ * A dashboard that answers four different questions on one scroll answers
+ * none of them quickly. The categories are subjects rather than urgency, so a
+ * card's tab is predictable: you learn once that trips live under Operations
+ * and you never hunt for them again. Shared with the per-role editor so it
+ * groups the widgets the way the dashboard shows them.
+ */
+export const DASHBOARD_TABS = ['Overview', 'Operations', 'Cash flow', 'Activity'] as const
+export type DashboardTab = (typeof DASHBOARD_TABS)[number]
+
+export const WIDGET_TAB: Record<DashboardWidget, DashboardTab> = {
+  // `kpis` puts the band on screen and it sits in Overview with the volume
+  // trend: both are forms of "how are we doing", which is what Overview is for.
+  kpis: 'Overview',
+  needsAttention: 'Overview',
+  volumeSold: 'Overview',
+  announcements: 'Overview',
+  // Bought vs sold plots liters in against liters out, so it belongs with
+  // stock rather than with money, and next to the Depots card it explains.
+  stockByWarehouse: 'Operations',
+  incoming: 'Operations',
+  deliveryBoard: 'Operations',
+  boughtVsSold: 'Operations',
+  agentQuota: 'Cash flow',
+  receivables: 'Cash flow',
+  recentTransactions: 'Activity',
+  approvals: 'Activity',
+  // Lives in the side rail, so it contributes no blocks and needs no tab.
+  todos: 'Activity',
+}
+
+/**
+ * How much of a dashboard row a widget takes - what the editor's preview
+ * draws. Kept in step with the `width` each widget's blocks declare in
+ * Dashboard.tsx; a widget that renders two half cards is 'half' here because
+ * that is how it packs.
+ */
+export const WIDGET_WIDTH: Record<DashboardWidget, 'full' | 'half' | 'rail'> = {
+  kpis: 'full',
+  needsAttention: 'full',
+  volumeSold: 'half',
+  announcements: 'half',
+  stockByWarehouse: 'half',
+  incoming: 'half',
+  deliveryBoard: 'full',
+  boughtVsSold: 'full',
+  agentQuota: 'half',
+  receivables: 'half',
+  recentTransactions: 'full',
+  approvals: 'full',
+  todos: 'rail',
+}
 
 /**
  * A saved config plus any widget introduced after it was written.

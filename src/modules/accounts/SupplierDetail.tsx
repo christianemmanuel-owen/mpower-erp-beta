@@ -98,6 +98,18 @@ export default function SupplierDetail({ stat, purchases, quotes, warehouses, on
           <Row label="Payment terms" value={fmtTerm(s.paymentTermDays)} />
         </div>
       </div>
+      {(s.agentName || s.depotName || s.depotAddress) && (
+        <div className="mt-[8px] grid grid-cols-2 gap-x-5">
+          <div className="min-w-0">
+            <Row label="Sales agent" value={s.agentName ?? '—'} />
+            <Row label="Agent contact" value={s.agentContact ?? '—'} />
+          </div>
+          <div className="min-w-0">
+            <Row label="Loading depot" value={s.depotName ?? '—'} />
+            <Row label="Depot address" value={s.depotAddress ?? '—'} />
+          </div>
+        </div>
+      )}
 
       <FormSection>Quote history</FormSection>
       <div className="overflow-hidden rounded-[8px] border border-line">

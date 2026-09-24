@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  tripDeparture,
   availableCrew, availableTrucks, checklistProgress, deliveryPerformance, documentsFor,
-  emptyChecklist, movementType, needsChecklist, scheduleDrift, wasOnTime,
+  emptyChecklist, movementType, needsChecklist, scheduleDrift, wasOnTime, CHECKLIST_ITEMS,
 } from './logistics'
 import type { Delivery, Personnel, Truck } from '../data/types'
 
@@ -61,11 +62,14 @@ describe('checklistProgress', () => {
     expect(p.outstanding).not.toContain('Load confirmed')
   })
 
-  it('is complete only when every item is ticked', () => {
+  it('is complete only when every item is ticked, and signed only with all three signatures', () => {
     const all = Object.fromEntries(
-      Object.keys(emptyChecklist()).map((k) => [k, true]),
+      CHECKLIST_ITEMS.map((i) => [i.key, true]),
     ) as unknown as ReturnType<typeof emptyChecklist>
     expect(checklistProgress(all).complete).toBe(true)
+    expect(checklistProgress(all).signed).toBe(false)
+    const sig = { name: 'x', image: 'data:image/png;base64,', at: '2026-09-17T00:00:00.000Z' }
+    expect(checklistProgress({ ...all, signatures: { driver: sig, pahinante: sig, dispatcher: sig } }).signed).toBe(true)
   })
 })
 
@@ -243,5 +247,18 @@ describe('requested vs final schedule', () => {
     })
     expect(wasOnTime(renegotiated)).toBe(true)
     expect(scheduleDrift(renegotiated)).toBe(3)
+  })
+})
+
+describe('tripDeparture', () => {
+  it('checks a ban against the departure time, not the time the date field holds', () => {
+    // The date input stores midnight; the day strip stores the departure.
+    const d = { scheduleDate: '2026-09-29T00:00:00.000Z', scheduleTime: '10:30' }
+    const at = tripDeparture(d)
+    expect(at.getHours()).toBe(10)
+    expect(at.getMinutes()).toBe(30)
+    expect(at.getDate()).toBe(new Date(d.scheduleDate).getDate())
+    // Without a departure the stored instant stands.
+    expect(tripDeparture({ scheduleDate: '2026-09-29T07:00:00.000Z' }).toISOString()).toBe('2026-09-29T07:00:00.000Z')
   })
 })

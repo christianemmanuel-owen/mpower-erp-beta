@@ -15,7 +15,7 @@ vi.mock('../../data/seed', () => ({ resetDemoData: vi.fn() }))
 vi.mock('../../lib/data', () => ({
   useTables: () => ({
     suppliers: [{ id: 'sup1', name: 'Seaoil', contactPerson: 'R. Cruz', contactNumber: '0917', paymentTermDays: 30 }],
-    warehouses: [], agents: [], customers: [], bankAccounts: [], trucks: [], seats: [],
+    haulers: [], warehouses: [], agents: [], customers: [], bankAccounts: [], trucks: [], seats: [],
   }),
 }))
 vi.mock('../../lib/auth', async (original) => ({
@@ -39,7 +39,7 @@ describe('Admin settings', () => {
 
     const dialog = within(screen.getByRole('dialog'))
     expect(screen.getByText('Delete Seaoil?')).toBeTruthy()
-    fireEvent.click(dialog.getByRole('button', { name: 'Delete' }))
+    fireEvent.click(dialog.getByRole('button', { name: 'Delete supplier' }))
     expect(safeDelete).toHaveBeenCalledWith('suppliers', 'sup1')
   })
 
@@ -48,7 +48,7 @@ describe('Admin settings', () => {
   it('confirms before replacing everything with demo data', () => {
     view()
     fireEvent.click(screen.getByRole('button', { name: 'Reset demo data' }))
-    expect(screen.getByText('Replace everything with the demo dataset?')).toBeTruthy()
+    expect(screen.getByText('Replace everything with the demo data?')).toBeTruthy()
   })
 
   /** The title used to name the list - "Edit - Suppliers" - which says what you

@@ -68,7 +68,8 @@ export interface ChecklistBlock {
 export interface SignatureBlock {
   kind: 'signatures'
   heading?: string
-  signatories: { role: string; name?: string }[]
+  /** `image` is a drawn signature (PNG data URL); with one, the line is drawn under it. */
+  signatories: { role: string; name?: string; image?: string; signedAt?: string }[]
 }
 
 export interface NoteBlock {
@@ -123,7 +124,7 @@ function signaturesHtml(b: SignatureBlock) {
   const sigs = b.signatories
     .map(
       (s) =>
-        `<div class="sig"><div class="line"></div><div class="who">${esc(s.name ?? '')}</div><div class="role">${esc(s.role)}</div></div>`,
+        `<div class="sig">${s.image ? `<img class="ink" src="${s.image}" alt="">` : ''}<div class="line"></div><div class="who">${esc(s.name ?? '')}${s.signedAt ? `<span class="when"> · signed ${esc(s.signedAt.slice(0, 10))}</span>` : ''}</div><div class="role">${esc(s.role)}</div></div>`,
     )
     .join('')
   return `${b.heading ? `<h2>${esc(b.heading)}</h2>` : ''}<div class="sigs">${sigs}</div>`
@@ -177,6 +178,8 @@ function styles(paper: PaperSize) {
     .sigs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
             gap: 22px 18px; margin-top: 26px; }
     .sig .line { border-bottom: 1px solid #16202e; height: 26px; }
+    .sig .ink { display: block; height: 34px; width: auto; max-width: 100%; margin-bottom: -30px; position: relative; }
+    .sig .when { font-weight: 400; color: #5a6779; }
     .sig .who { font-size: 10px; font-weight: 600; margin-top: 3px; min-height: 13px; }
     .sig .role { font-size: 9px; color: #5a6779; text-transform: uppercase; letter-spacing: .05em; }
     .note { font-size: 10px; color: #5a6779; margin-top: 12px; }
